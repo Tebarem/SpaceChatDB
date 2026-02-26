@@ -1,0 +1,11 @@
+E:\Users\scott\Pogly\SpaceChatDB\spacetimedb\target\wasm32-unknown-unknown\release\deps\approx-f3984792d6ea086b.d: C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\lib.rs C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\abs_diff_eq.rs C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\relative_eq.rs C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\ulps_eq.rs C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\macros.rs
+
+E:\Users\scott\Pogly\SpaceChatDB\spacetimedb\target\wasm32-unknown-unknown\release\deps\libapprox-f3984792d6ea086b.rlib: C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\lib.rs C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\abs_diff_eq.rs C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\relative_eq.rs C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\ulps_eq.rs C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\macros.rs
+
+E:\Users\scott\Pogly\SpaceChatDB\spacetimedb\target\wasm32-unknown-unknown\release\deps\libapprox-f3984792d6ea086b.rmeta: C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\lib.rs C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\abs_diff_eq.rs C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\relative_eq.rs C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\ulps_eq.rs C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\macros.rs
+
+C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\lib.rs:
+C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\abs_diff_eq.rs:
+C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\relative_eq.rs:
+C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\ulps_eq.rs:
+C:\Users\scott\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\approx-0.3.2\src\macros.rs:
