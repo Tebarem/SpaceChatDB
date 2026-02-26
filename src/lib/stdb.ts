@@ -235,6 +235,7 @@ export function connectStdb() {
     .withUri(HOST)
     .withDatabaseName(DB)
     .withToken(savedToken || undefined)
+    .withConfirmedReads(false)
     .onConnect((conn: DbConnection, identity: Identity, token: string) => {
       localStorage.setItem(TOKEN_KEY, token);
 
