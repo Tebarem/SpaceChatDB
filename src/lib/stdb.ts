@@ -323,7 +323,8 @@ function applySettingsRow(row: any) {
     video_height: mustField(row, 'video_height', ['video_height', 'videoHeight']),
     video_fps: mustField(row, 'video_fps', ['video_fps', 'videoFps']),
     video_jpeg_quality: mustField(row, 'video_jpeg_quality', ['video_jpeg_quality', 'videoJpegQuality']),
-    video_max_frame_bytes: mustField(row, 'video_max_frame_bytes', ['video_max_frame_bytes', 'videoMaxFrameBytes'])
+    video_max_frame_bytes: mustField(row, 'video_max_frame_bytes', ['video_max_frame_bytes', 'videoMaxFrameBytes']),
+    video_iframe_interval: mustField(row, 'video_iframe_interval', ['video_iframe_interval', 'videoIframeInterval'])
   };
 
   mediaSettingsStore.set(s);

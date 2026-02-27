@@ -17,5 +17,6 @@ export default __t.row({
   seq: __t.u32(),
   width: __t.u16(),
   height: __t.u16(),
+  isIframe: __t.bool().name("is_iframe"),
   jpeg: __t.byteArray(),
 });

@@ -69,6 +69,7 @@ pub struct MediaSettings {
     pub video_fps: u8,            // send rate (interval = 1000/fps)
     pub video_jpeg_quality: f32,  // 0.0 - 1.0
     pub video_max_frame_bytes: u32,
+    pub video_iframe_interval: u8, // send I-frame every N video frames (e.g., 15)
 }
 
 #[spacetimedb::table(accessor = audio_frame_event, public, event)]
@@ -93,6 +94,7 @@ pub struct VideoFrameEvent {
     pub seq: u32,
     pub width: u16,
     pub height: u16,
+    pub is_iframe: bool,
     pub jpeg: Vec<u8>,
 }
 
@@ -114,6 +116,7 @@ pub fn init(ctx: &ReducerContext) {
             video_fps: 5,
             video_jpeg_quality: 0.55,
             video_max_frame_bytes: 512000,
+            video_iframe_interval: 15,
         });
     }
 }
@@ -371,6 +374,7 @@ pub fn send_video_frame(
     seq: u32,
     width: u16,
     height: u16,
+    is_iframe: bool,
     jpeg: Vec<u8>,
 ) -> Result<(), String> {
     let who = ctx.sender();
@@ -405,6 +409,7 @@ pub fn send_video_frame(
         seq,
         width,
         height,
+        is_iframe,
         jpeg,
     });
 

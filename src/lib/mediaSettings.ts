@@ -13,6 +13,7 @@ export type MediaSettings = {
   video_fps: number;
   video_jpeg_quality: number;
   video_max_frame_bytes: number;
+  video_iframe_interval: number;
 };
 
 // No defaults: null until loaded from DB

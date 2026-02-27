@@ -21,4 +21,5 @@ export default __t.row({
   videoFps: __t.u8().name("video_fps"),
   videoJpegQuality: __t.f32().name("video_jpeg_quality"),
   videoMaxFrameBytes: __t.u32().name("video_max_frame_bytes"),
+  videoIframeInterval: __t.u8().name("video_iframe_interval"),
 });

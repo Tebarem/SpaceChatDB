@@ -70,6 +70,7 @@ export const MediaSettings = __t.object("MediaSettings", {
   videoFps: __t.u8(),
   videoJpegQuality: __t.f32(),
   videoMaxFrameBytes: __t.u32(),
+  videoIframeInterval: __t.u8(),
 });
 export type MediaSettings = __Infer<typeof MediaSettings>;
 
@@ -87,6 +88,7 @@ export const VideoFrameEvent = __t.object("VideoFrameEvent", {
   seq: __t.u32(),
   width: __t.u16(),
   height: __t.u16(),
+  isIframe: __t.bool(),
   jpeg: __t.byteArray(),
 });
 export type VideoFrameEvent = __Infer<typeof VideoFrameEvent>;

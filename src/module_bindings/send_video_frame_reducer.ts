@@ -16,5 +16,6 @@ export default {
   seq: __t.u32(),
   width: __t.u16(),
   height: __t.u16(),
+  isIframe: __t.bool(),
   jpeg: __t.byteArray(),
 };

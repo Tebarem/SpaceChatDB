@@ -7,6 +7,12 @@ export const localVideoStream = writable<MediaStream | null>(null);
 export const remoteVideoUrl = writable<string | null>(null);
 export const remoteTalking = writable<boolean>(false);
 
+const AUDIO_JITTER_FRAMES = 3;   // ~150ms at 50ms frame time
+const VIDEO_JITTER_FRAMES = 2;   // buffer depth before draining
+
+type AudioBufferEntry = { pcm: Float32Array; sampleRate: number };
+type VideoBufferEntry = { jpeg: Uint8Array; isIframe: boolean; seq: number };
+
 type ActiveRuntime = {
   conn: DbConnection;
   myHex: string;
@@ -26,6 +32,14 @@ type ActiveRuntime = {
   talkTimer?: number;
   lastRemoteUrl?: string;
   cfg: MediaSettings;
+  // Audio jitter buffer
+  audioJitterBuffer: Map<number, AudioBufferEntry>;
+  recvSeqAudio: number;
+  audioBufferReady: boolean;
+  // Video jitter buffer
+  videoJitterBuffer: Map<number, VideoBufferEntry>;
+  recvSeqVideo: number;
+  lastVideoIframeSeq: number;
 };
 
 let runtime: ActiveRuntime | null = null;
@@ -46,6 +60,7 @@ function validateCfg(cfg: MediaSettings): MediaSettings {
   mustFinite(cfg.video_fps, 'video_fps');
   mustFinite(cfg.video_jpeg_quality, 'video_jpeg_quality');
   mustFinite(cfg.video_max_frame_bytes, 'video_max_frame_bytes');
+  mustFinite(cfg.video_iframe_interval, 'video_iframe_interval');
 
   return cfg;
 }
@@ -178,6 +193,59 @@ function scheduleAudio(audioCtx: AudioContext, nextPlayTime: number, pcm: Float3
   return startAt + pcm.length / sampleRate;
 }
 
+function displayVideoFrame(rt: ActiveRuntime, jpeg: Uint8Array) {
+  const blob = new Blob([jpeg], { type: 'image/jpeg' });
+  const url = URL.createObjectURL(blob);
+  if (rt.lastRemoteUrl) URL.revokeObjectURL(rt.lastRemoteUrl);
+  rt.lastRemoteUrl = url;
+  remoteVideoUrl.set(url);
+}
+
+function drainAudioBuffer(rt: ActiveRuntime) {
+  if (!rt.audioBufferReady) return;
+  while (rt.audioJitterBuffer.has(rt.recvSeqAudio)) {
+    const entry = rt.audioJitterBuffer.get(rt.recvSeqAudio)!;
+    rt.audioJitterBuffer.delete(rt.recvSeqAudio);
+    rt.nextPlayTime = scheduleAudio(rt.audioCtx, rt.nextPlayTime, entry.pcm, entry.sampleRate);
+    rt.recvSeqAudio++;
+  }
+  if (rt.audioJitterBuffer.size > 0) {
+    const minSeq = Math.min(...rt.audioJitterBuffer.keys());
+    const gap = minSeq - rt.recvSeqAudio;
+    if (gap > AUDIO_JITTER_FRAMES * 2) {
+      const frameSize = Math.floor(rt.cfg.audio_target_sample_rate * rt.cfg.audio_frame_ms / 1000);
+      const silence = new Float32Array(gap * frameSize);
+      rt.nextPlayTime = scheduleAudio(rt.audioCtx, rt.nextPlayTime, silence, rt.cfg.audio_target_sample_rate);
+      rt.recvSeqAudio = minSeq;
+      drainAudioBuffer(rt);
+    }
+  }
+}
+
+function drainVideoBuffer(rt: ActiveRuntime) {
+  while (rt.videoJitterBuffer.has(rt.recvSeqVideo)) {
+    const entry = rt.videoJitterBuffer.get(rt.recvSeqVideo)!;
+    rt.videoJitterBuffer.delete(rt.recvSeqVideo);
+    rt.recvSeqVideo++;
+    if (!entry.isIframe && rt.lastVideoIframeSeq === -1) continue;
+    if (entry.isIframe) rt.lastVideoIframeSeq = entry.seq;
+    displayVideoFrame(rt, entry.jpeg);
+  }
+  if (rt.videoJitterBuffer.size > 0) {
+    const minSeq = Math.min(...rt.videoJitterBuffer.keys());
+    const gap = minSeq - rt.recvSeqVideo;
+    if (gap > VIDEO_JITTER_FRAMES) {
+      let resyncSeq = minSeq;
+      for (const [seq, entry] of rt.videoJitterBuffer) {
+        if (entry.isIframe && seq < resyncSeq) resyncSeq = seq;
+      }
+      rt.recvSeqVideo = resyncSeq;
+      rt.lastVideoIframeSeq = -1;
+      drainVideoBuffer(rt);
+    }
+  }
+}
+
 async function startOrRestartVideo(rt: ActiveRuntime, session: any) {
   if (rt.callType !== 'Video') return;
 
@@ -230,6 +298,7 @@ async function startOrRestartVideo(rt: ActiveRuntime, session: any) {
 
     const sessionId = session.session_id ?? session.sessionId;
     const seq = rt.sendSeqVideo++;
+    const isIframe = (seq % rt.cfg.video_iframe_interval) === 0;
 
     safeSendReducer(rt.conn, 'send_video_frame', 'sendVideoFrame', {
       session_id: sessionId,
@@ -238,6 +307,8 @@ async function startOrRestartVideo(rt: ActiveRuntime, session: any) {
       seq,
       width: w,
       height: h,
+      is_iframe: isIframe,
+      isIframe,
       jpeg: bytes
     });
   }, intervalMs);
@@ -281,7 +352,13 @@ export async function startCallRuntime(session: any, conn: DbConnection, myId: I
     stopFns: [],
     sendSeqAudio: 0,
     sendSeqVideo: 0,
-    cfg
+    cfg,
+    audioJitterBuffer: new Map(),
+    recvSeqAudio: -1,
+    audioBufferReady: false,
+    videoJitterBuffer: new Map(),
+    recvSeqVideo: -1,
+    lastVideoIframeSeq: -1
   };
   runtime = rt;
 
@@ -423,8 +500,14 @@ export function handleAudioEvent(row: any) {
 
   const pcm = pcm16leBytesToFloat(bytes);
   const sr = Number(row.sample_rate ?? row.sampleRate ?? runtime.cfg.audio_target_sample_rate);
+  const seq = Number(row.seq ?? 0);
 
-  runtime.nextPlayTime = scheduleAudio(runtime.audioCtx, runtime.nextPlayTime, pcm, sr);
+  if (runtime.recvSeqAudio === -1) runtime.recvSeqAudio = seq;
+  runtime.audioJitterBuffer.set(seq, { pcm, sampleRate: sr });
+  if (!runtime.audioBufferReady && runtime.audioJitterBuffer.size >= AUDIO_JITTER_FRAMES) {
+    runtime.audioBufferReady = true;
+  }
+  drainAudioBuffer(runtime);
 
   const rms = Number(row.rms ?? 0);
   if (rms > runtime.cfg.audio_talking_rms_threshold) {
@@ -448,11 +531,10 @@ export function handleVideoEvent(row: any) {
   const jpeg = getBytes(row, ['jpeg']);
   if (!jpeg) return;
 
-  const blob = new Blob([jpeg], { type: 'image/jpeg' });
-  const url = URL.createObjectURL(blob);
+  const seq = Number(row.seq ?? 0);
+  const isIframe: boolean = row.is_iframe ?? row.isIframe ?? false;
 
-  if (runtime.lastRemoteUrl) URL.revokeObjectURL(runtime.lastRemoteUrl);
-  runtime.lastRemoteUrl = url;
-
-  remoteVideoUrl.set(url);
+  if (runtime.recvSeqVideo === -1) runtime.recvSeqVideo = seq;
+  runtime.videoJitterBuffer.set(seq, { jpeg, isIframe, seq });
+  drainVideoBuffer(runtime);
 }
