@@ -10,6 +10,7 @@ export const remotePeers = writable<Map<string, PeerState>>(new Map());
 
 const AUDIO_JITTER_FRAMES = 2;   // ~40ms at 20ms frame time
 const VIDEO_JITTER_FRAMES = 2;   // buffer depth before draining
+const MAX_AUDIO_QUEUE_S = 0.25;  // hard cap: reset clock if queue exceeds 250ms, preventing runaway lag
 
 type AudioBufferEntry = { pcm: Float32Array; sampleRate: number };
 type VideoBufferEntry = { jpeg: Uint8Array; isIframe: boolean; seq: number };
@@ -153,24 +154,45 @@ function getBytes(row: any, names: string[]): Uint8Array | null {
   return null;
 }
 
-function floatToPcm16leBytes(samples: Float32Array): { bytes: Uint8Array; rms: number } {
-  let sumSq = 0;
-  const i16 = new Int16Array(samples.length);
-  for (let i = 0; i < samples.length; i++) {
-    const s = Math.max(-1, Math.min(1, samples[i]));
-    sumSq += s * s;
-    i16[i] = (s < 0 ? s * 32768 : s * 32767) | 0;
-  }
-  const rms = Math.sqrt(sumSq / Math.max(1, samples.length));
-  const bytes = new Uint8Array(i16.buffer.slice(0));
-  return { bytes, rms };
+// μ-law (G.711) codec — 1 byte per sample, 2:1 compression, logarithmic, good for voice.
+// The server treats the payload as opaque bytes so no server changes are needed.
+function pcmToMulaw(s16: number): number {
+  const BIAS = 0x84;
+  const CLIP = 32635;
+  const sign = s16 < 0 ? 0x80 : 0;
+  let s = sign ? -s16 : s16;
+  if (s > CLIP) s = CLIP;
+  s += BIAS;
+  let exp = 7;
+  for (let mask = 0x4000; exp > 0 && (s & mask) === 0; exp--, mask >>= 1) {}
+  const mantissa = (s >> (exp + 3)) & 0x0f;
+  return (~(sign | (exp << 4) | mantissa)) & 0xff;
 }
 
-function pcm16leBytesToFloat(bytes: Uint8Array): Float32Array {
-  const copy = bytes.slice().buffer;
-  const i16 = new Int16Array(copy);
-  const out = new Float32Array(i16.length);
-  for (let i = 0; i < i16.length; i++) out[i] = i16[i] / 32768;
+function mulawToPcm(ulaw: number): number {
+  ulaw = ~ulaw & 0xff;
+  const sign = ulaw & 0x80;
+  const exp = (ulaw >> 4) & 0x07;
+  const mantissa = ulaw & 0x0f;
+  let s = ((mantissa << 3) + 0x84) << exp;
+  s -= 0x84;
+  return sign ? -s : s;
+}
+
+function floatToMulawBytes(samples: Float32Array): { bytes: Uint8Array; rms: number } {
+  let sumSq = 0;
+  const out = new Uint8Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const f = Math.max(-1, Math.min(1, samples[i]));
+    sumSq += f * f;
+    out[i] = pcmToMulaw((f < 0 ? f * 32768 : f * 32767) | 0);
+  }
+  return { bytes: out, rms: Math.sqrt(sumSq / Math.max(1, samples.length)) };
+}
+
+function mulawBytesToFloat(bytes: Uint8Array): Float32Array {
+  const out = new Float32Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) out[i] = mulawToPcm(bytes[i]) / 32768;
   return out;
 }
 
@@ -196,7 +218,12 @@ function scheduleAudio(audioCtx: AudioContext, nextPlayTime: number, pcm: Float3
   src.buffer = buf;
   src.connect(audioCtx.destination);
 
-  const startAt = Math.max(nextPlayTime, audioCtx.currentTime + 0.02);
+  // If the queue has grown beyond the cap, reset to now+20ms (brief glitch, prevents
+  // runaway latency that would otherwise accumulate to minutes over long calls).
+  const clamped = nextPlayTime > audioCtx.currentTime + MAX_AUDIO_QUEUE_S
+    ? audioCtx.currentTime + 0.02
+    : nextPlayTime;
+  const startAt = Math.max(clamped, audioCtx.currentTime + 0.02);
   src.start(startAt);
   return startAt + pcm.length / sampleRate;
 }
@@ -249,14 +276,17 @@ function drainVideoBuffer(peer: PerPeerRuntime, cfg: MediaSettings) {
   while (peer.videoJitterBuffer.has(peer.recvSeqVideo)) {
     const entry = peer.videoJitterBuffer.get(peer.recvSeqVideo)!;
 
-    // Sync gate: hold video frames that are ahead of audio playback.
-    // Both seq spaces start at 0 at call start, so video frame M maps to
-    // audio frame M * 1000 / (video_fps * audio_frame_ms).
-    // Allow up to ~1 s of audio-ahead before giving up on sync.
+    // Sync gate: hold video frames that are ahead of the audio that is CURRENTLY BEING HEARD.
+    // recvSeqAudio counts scheduled frames, which may be buffered ahead of playback.
+    // Subtract buffered-ahead frames to get the seq actually playing right now.
     if (peer.recvSeqAudio >= 0) {
+      const bufferedAheadFrames = Math.round(
+        Math.max(0, peer.nextPlayTime - peer.audioCtx.currentTime) / (cfg.audio_frame_ms / 1000)
+      );
+      const playingAudioSeq = Math.max(0, peer.recvSeqAudio - bufferedAheadFrames);
       const targetAudioSeq = Math.round(entry.seq * 1000 / (cfg.video_fps * cfg.audio_frame_ms));
-      const MAX_AUDIO_LEAD = Math.ceil(1000 / cfg.audio_frame_ms); // ~1 s worth of audio frames
-      if (targetAudioSeq > peer.recvSeqAudio && targetAudioSeq - peer.recvSeqAudio < MAX_AUDIO_LEAD) {
+      const MAX_AUDIO_LEAD = Math.ceil(1000 / cfg.audio_frame_ms); // ~1 s safety valve
+      if (targetAudioSeq > playingAudioSeq && targetAudioSeq - playingAudioSeq < MAX_AUDIO_LEAD) {
         break; // audio hasn't caught up yet; wait
       }
     }
@@ -508,7 +538,7 @@ export async function startCallRuntime(
       bufferIn = bufferIn.slice(blockIn);
 
       const resampled = resampleLinear(head, inRate, outRate);
-      const { bytes, rms } = floatToPcm16leBytes(resampled);
+      const { bytes, rms } = floatToMulawBytes(resampled);
 
       if (bytes.length > runtime.cfg.audio_max_frame_bytes) continue;
 
@@ -578,7 +608,7 @@ export function handleAudioEvent(row: any) {
   const bytes = getBytes(row, ['pcm16le', 'pcm16Le', 'pcm16_le', 'pcm_16le']);
   if (!bytes) return;
 
-  const pcm = pcm16leBytesToFloat(bytes);
+  const pcm = mulawBytesToFloat(bytes);
   const sr = Number(row.sample_rate ?? row.sampleRate ?? runtime.cfg.audio_target_sample_rate);
   const seq = Number(row.seq ?? 0);
 
