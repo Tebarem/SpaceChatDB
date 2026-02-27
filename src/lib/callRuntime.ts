@@ -8,7 +8,7 @@ export const localVideoStream = writable<MediaStream | null>(null);
 export type PeerState = { hex: string; talking: boolean; videoUrl: string | null };
 export const remotePeers = writable<Map<string, PeerState>>(new Map());
 
-const AUDIO_JITTER_FRAMES = 3;   // ~150ms at 50ms frame time
+const AUDIO_JITTER_FRAMES = 2;   // ~40ms at 20ms frame time
 const VIDEO_JITTER_FRAMES = 2;   // buffer depth before draining
 
 type AudioBufferEntry = { pcm: Float32Array; sampleRate: number };
@@ -238,13 +238,29 @@ function drainAudioBuffer(peer: PerPeerRuntime, cfg: MediaSettings) {
       peer.nextPlayTime = scheduleAudio(peer.audioCtx, peer.nextPlayTime, silence, cfg.audio_target_sample_rate);
       peer.recvSeqAudio = minSeq;
       drainAudioBuffer(peer, cfg);
+      return;
     }
   }
+  // Release any video frames that were waiting for audio to catch up.
+  drainVideoBuffer(peer, cfg);
 }
 
-function drainVideoBuffer(peer: PerPeerRuntime) {
+function drainVideoBuffer(peer: PerPeerRuntime, cfg: MediaSettings) {
   while (peer.videoJitterBuffer.has(peer.recvSeqVideo)) {
     const entry = peer.videoJitterBuffer.get(peer.recvSeqVideo)!;
+
+    // Sync gate: hold video frames that are ahead of audio playback.
+    // Both seq spaces start at 0 at call start, so video frame M maps to
+    // audio frame M * 1000 / (video_fps * audio_frame_ms).
+    // Allow up to ~1 s of audio-ahead before giving up on sync.
+    if (peer.recvSeqAudio >= 0) {
+      const targetAudioSeq = Math.round(entry.seq * 1000 / (cfg.video_fps * cfg.audio_frame_ms));
+      const MAX_AUDIO_LEAD = Math.ceil(1000 / cfg.audio_frame_ms); // ~1 s worth of audio frames
+      if (targetAudioSeq > peer.recvSeqAudio && targetAudioSeq - peer.recvSeqAudio < MAX_AUDIO_LEAD) {
+        break; // audio hasn't caught up yet; wait
+      }
+    }
+
     peer.videoJitterBuffer.delete(peer.recvSeqVideo);
     peer.recvSeqVideo++;
     if (!entry.isIframe && peer.lastVideoIframeSeq === -1) continue;
@@ -261,7 +277,7 @@ function drainVideoBuffer(peer: PerPeerRuntime) {
       }
       peer.recvSeqVideo = resyncSeq;
       peer.lastVideoIframeSeq = -1;
-      drainVideoBuffer(peer);
+      drainVideoBuffer(peer, cfg);
     }
   }
 }
@@ -450,7 +466,7 @@ export async function startCallRuntime(
 
   // Mic
   const mic = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000 },
     video: false
   });
   rt.micStream = mic;
@@ -461,7 +477,13 @@ export async function startCallRuntime(
   const source = micAudioCtx.createMediaStreamSource(mic);
   const node = new AudioWorkletNode(micAudioCtx, 'pcm-capture');
   rt.workletNode = node;
-  source.connect(node);
+
+  const antiAliasFilter = micAudioCtx.createBiquadFilter();
+  antiAliasFilter.type = 'lowpass';
+  antiAliasFilter.frequency.value = rt.cfg.audio_target_sample_rate * 0.45;
+  antiAliasFilter.Q.value = 0.707;
+  source.connect(antiAliasFilter);
+  antiAliasFilter.connect(node);
 
   const inRate = micAudioCtx.sampleRate;
   const outRate = rt.cfg.audio_target_sample_rate;
@@ -597,5 +619,5 @@ export function handleVideoEvent(row: any) {
 
   if (peer.recvSeqVideo === -1) peer.recvSeqVideo = seq;
   peer.videoJitterBuffer.set(seq, { jpeg, isIframe, seq });
-  drainVideoBuffer(peer);
+  drainVideoBuffer(peer, runtime.cfg);
 }

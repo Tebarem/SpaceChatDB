@@ -118,8 +118,8 @@ pub fn init(ctx: &ReducerContext) {
         ctx.db.media_settings().insert(MediaSettings {
             id: 1,
 
-            audio_target_sample_rate: 16000,
-            audio_frame_ms: 50,
+            audio_target_sample_rate: 24000,
+            audio_frame_ms: 20,
             audio_max_frame_bytes: 64000,
             audio_talking_rms_threshold: 0.02,
 
