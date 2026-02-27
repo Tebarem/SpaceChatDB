@@ -9,13 +9,16 @@ import {
   type AlgebraicTypeType as __AlgebraicTypeType,
   type Infer as __Infer,
 } from "spacetimedb";
+import {
+  CallType,
+} from "./types";
+
 
 export default __t.row({
-  roomId: __t.uuid().name("room_id"),
-  from: __t.identity(),
-  seq: __t.u32(),
-  sampleRate: __t.u32().name("sample_rate"),
-  channels: __t.u8(),
-  rms: __t.f32(),
-  pcm16Le: __t.byteArray().name("pcm_16_le"),
+  roomId: __t.uuid().primaryKey().name("room_id"),
+  get callType() {
+    return CallType.name("call_type");
+  },
+  createdAt: __t.timestamp().name("created_at"),
+  creator: __t.identity(),
 });

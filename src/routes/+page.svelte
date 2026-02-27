@@ -8,20 +8,22 @@
     identityStore,
     usersStore,
     messagesStore,
-    callSessionsStore,
+    callRoomsStore,
+    callParticipantsStore,
     incomingCallStore,
     activeCallStore,
     sendChat,
-    requestCall,
-    acceptCall,
-    declineCall,
-    endCall,
+    createRoom,
+    inviteToRoom,
+    joinRoom,
+    declineInvite,
+    leaveRoom,
     setNickname,
     shortHex,
     identityHex,
     connStore
   } from '$lib/stdb';
-  import { startCallRuntime, stopCallRuntime, localVideoStream, remoteVideoUrl, remoteTalking } from '$lib/callRuntime';
+  import { startCallRuntime, stopCallRuntime, localVideoStream, remotePeers, type PeerState } from '$lib/callRuntime';
 
   let messageText = '';
   let nicknameText = '';
@@ -42,8 +44,8 @@
     return id?.toString?.() ?? String(id ?? crypto.randomUUID());
   }
 
-  function sessionIdOf(sess: any): string {
-    const id = sess?.session_id ?? sess?.sessionId;
+  function roomIdOfAny(item: any): string {
+    const id = item?.room_id ?? item?.roomId;
     return id?.toString?.() ?? String(id ?? '');
   }
 
@@ -58,50 +60,12 @@
     return String(v).toLowerCase();
   }
 
-  function callTypeTag(sess: any): string {
-    return tagLower(sess?.call_type ?? sess?.callType);
+  function callTypeTag(room: any): string {
+    return tagLower(room?.call_type ?? room?.callType);
   }
 
-  function callTypeLabel(sess: any): string {
-    return callTypeTag(sess) === 'video' ? 'Video' : 'Voice';
-  }
-
-  function stateTag(sess: any): string {
-    return tagLower(sess?.state);
-  }
-
-  function answeredAtField(sess: any) {
-    return sess?.answered_at ?? sess?.answeredAt;
-  }
-
-  function isOptionNone(v: any): boolean {
-    if (v == null) return true;
-    const t = tagLower(v);
-    if (t === 'none') return true;
-    if (typeof v === 'object') {
-      const keys = Object.keys(v);
-      if (keys.length === 1 && keys[0].toLowerCase() === 'none') return true;
-    }
-    return false;
-  }
-
-  function isOptionSome(v: any): boolean {
-    if (v == null) return false;
-    const t = tagLower(v);
-    if (t === 'some') return true;
-    if (typeof v === 'object') {
-      const keys = Object.keys(v);
-      if (keys.length === 1 && keys[0].toLowerCase() === 'some') return true;
-    }
-    return false;
-  }
-
-  function isUnanswered(sess: any): boolean {
-    return isOptionNone(answeredAtField(sess));
-  }
-
-  function isAnswered(sess: any): boolean {
-    return isOptionSome(answeredAtField(sess));
+  function callTypeLabel(room: any): string {
+    return callTypeTag(room) === 'video' ? 'Video' : 'Voice';
   }
 
   function findUserByIdentity(identity: any) {
@@ -120,6 +84,12 @@
     return u ? displayUser(u) : shortHex(identity);
   }
 
+  function displayIdentityHex(hex: string): string {
+    const u = ($usersStore ?? []).find((u) => (u.identity?.toHexString?.() ?? '') === hex);
+    if (u) return displayUser(u);
+    return hex.slice(0, 10) + '…';
+  }
+
   function openMenu(e: MouseEvent, u: any) {
     e.preventDefault();
     const myHex = identityHex($identityStore);
@@ -131,54 +101,34 @@
   async function call(type: 'Voice' | 'Video') {
     if (!menu.target) return;
     try {
-      await requestCall(menu.target.identity, type);
+      await createRoom([menu.target.identity], type);
     } catch (e) {
-      console.error('requestCall failed', e);
+      console.error('createRoom failed', e);
     } finally {
       closeMenu();
     }
   }
 
-  function recomputeCallUi() {
-    const me = $identityStore;
-    if (!me) return;
-
-    const meHex = me.toHexString();
-    const sessions = $callSessionsStore ?? [];
-
-    const incoming =
-      sessions.find((s) => (s.callee?.toHexString?.() ?? '') === meHex && isUnanswered(s)) ?? null;
-
-    incomingCallStore.set(incoming);
-
-    const active =
-      sessions.find((s) => {
-        const callerHex = s.caller?.toHexString?.() ?? '';
-        const calleeHex = s.callee?.toHexString?.() ?? '';
-        const amParticipant = callerHex === meHex || calleeHex === meHex;
-        if (!amParticipant) return false;
-
-        if (isAnswered(s)) return true;
-        return stateTag(s) === 'active';
-      }) ?? null;
-
-    const prev = $activeCallStore;
-    if (sessionIdOf(prev) !== sessionIdOf(active)) {
-      activeCallStore.set(active);
-      if (!active) {
-        stopCallRuntime();
-      } else {
-        const conn = $connStore;
-        if (conn) startCallRuntime(active, conn, me);
-      }
+  function inviteToCurrentCall() {
+    if (!menu.target) return;
+    const active = $activeCallStore;
+    if (!active) return;
+    const roomId = active.room_id ?? active.roomId;
+    try {
+      inviteToRoom(roomId, menu.target.identity);
+    } catch (e) {
+      console.error('inviteToRoom failed', e);
+    } finally {
+      closeMenu();
     }
   }
 
-  $: {
-    $identityStore;
-    $callSessionsStore;
-    $connStore;
-    recomputeCallUi();
+  function incomingCallType(): string {
+    const invite = $incomingCallStore;
+    if (!invite) return 'Voice';
+    const rid = roomIdOfAny(invite);
+    const room = ($callRoomsStore ?? []).find((r) => roomIdOfAny(r) === rid);
+    return room ? callTypeLabel(room) : 'Voice';
   }
 
   function onSend() {
@@ -202,23 +152,35 @@
     nicknameText = '';
   }
 
-  function acceptIncoming(sess: any) {
-    const id = sess?.session_id ?? sess?.sessionId;
-    acceptCall(id);
+  function acceptIncoming(invite: any) {
+    const roomId = invite?.room_id ?? invite?.roomId;
+    joinRoom(roomId);
     incomingCallStore.set(null);
   }
 
-  function declineIncoming(sess: any) {
-    const id = sess?.session_id ?? sess?.sessionId;
-    declineCall(id);
+  function declineIncoming(invite: any) {
+    const roomId = invite?.room_id ?? invite?.roomId;
+    declineInvite(roomId);
     incomingCallStore.set(null);
   }
 
-  function hangup(sess: any) {
-    const id = sess?.session_id ?? sess?.sessionId;
-    endCall(id);
+  function hangup(room: any) {
+    const roomId = room?.room_id ?? room?.roomId;
+    leaveRoom(roomId);
     activeCallStore.set(null);
     stopCallRuntime();
+  }
+
+  function joinedCount(room: any): number {
+    const rid = roomIdOfAny(room);
+    return ($callParticipantsStore ?? []).filter(
+      (p) => tagLower(p.state) === 'joined' && roomIdOfAny(p) === rid
+    ).length;
+  }
+
+  function invitedByDisplay(invite: any): string {
+    const invitedBy = invite?.invited_by ?? invite?.invitedBy;
+    return displayIdentity(invitedBy);
   }
 
   onMount(() => {
@@ -314,17 +276,21 @@
 
   {#if menu.open}
     <div class="contextMenu" style="left:{menu.x}px; top:{menu.y}px;">
-      <button class="menuBtn" on:click={() => void call('Voice')}>Voice call</button>
-      <button class="menuBtn" on:click={() => void call('Video')}>Video call</button>
+      {#if !$activeCallStore}
+        <button class="menuBtn" on:click={() => void call('Voice')}>Voice call</button>
+        <button class="menuBtn" on:click={() => void call('Video')}>Video call</button>
+      {:else}
+        <button class="menuBtn" on:click={() => inviteToCurrentCall()}>Invite to call</button>
+      {/if}
     </div>
   {/if}
 
   {#if $incomingCallStore}
     <div class="modalBackdrop">
       <div class="modal">
-        <div class="modalTitle">Incoming {callTypeLabel($incomingCallStore)} call</div>
+        <div class="modalTitle">Incoming {incomingCallType()} call</div>
         <div class="modalBody">
-          From: <span class="mono">{displayIdentity($incomingCallStore.caller)}</span>
+          From: <span class="mono">{invitedByDisplay($incomingCallStore)}</span>
         </div>
         <div class="modalActions">
           <button class="btn" on:click={() => acceptIncoming($incomingCallStore)}>Accept</button>
@@ -338,53 +304,54 @@
     <div class="callBar">
       <div class="callInfo">
         <div class="callTitle">
-          {callTypeLabel($activeCallStore)} call with
-          {#if identityHex($identityStore) === identityHex($activeCallStore.caller)}
-            {displayIdentity($activeCallStore.callee)}
-          {:else}
-            {displayIdentity($activeCallStore.caller)}
-          {/if}
+          {callTypeLabel($activeCallStore)} call
+          <span class="mono">({joinedCount($activeCallStore)} joined)</span>
         </div>
 
         {#if callTypeTag($activeCallStore) === 'voice'}
-          <div class="talk">
-            Remote:
-            {#if $remoteTalking}
-              <span class="pill ok">talking</span>
-            {:else}
-              <span class="pill">silent</span>
-            {/if}
+          <div class="talkGroup">
+            {#each Array.from($remotePeers.values()) as peer (peer.hex)}
+              <div class="talk">
+                {displayIdentityHex(peer.hex)}:
+                {#if peer.talking}
+                  <span class="pill ok">talking</span>
+                {:else}
+                  <span class="pill">silent</span>
+                {/if}
+              </div>
+            {/each}
           </div>
         {/if}
       </div>
 
       <div class="callActions">
-        <button class="btn danger" on:click={() => hangup($activeCallStore)}>End</button>
+        <button class="btn danger" on:click={() => hangup($activeCallStore)}>Leave</button>
       </div>
     </div>
 
     {#if callTypeTag($activeCallStore) === 'video'}
       <div class="videoStage">
         <div class="videoPane">
-          <div class="videoLabel">Local</div>
-          <video class="video" autoplay playsinline muted bind:this={localEl} />
+          <div class="videoLabel">You</div>
+          <video class="video" autoplay playsinline muted bind:this={localEl}></video>
         </div>
 
-        <div class="videoPane">
-          <div class="videoLabel">Remote</div>
-          {#if $remoteVideoUrl}
-            <img class="video" src={$remoteVideoUrl} alt="remote video" />
-          {:else}
-            <div class="videoPlaceholder">Waiting for remote video…</div>
-          {/if}
-        </div>
+        {#each Array.from($remotePeers.values()) as peer (peer.hex)}
+          <div class="videoPane">
+            <div class="videoLabel">{displayIdentityHex(peer.hex)}</div>
+            {#if peer.videoUrl}
+              <img class="video" src={peer.videoUrl} alt="remote video" />
+            {:else}
+              <div class="videoPlaceholder">Waiting…</div>
+            {/if}
+          </div>
+        {/each}
       </div>
     {/if}
   {/if}
 </div>
 
 <style>
-  /* unchanged styles (keep what you already have) */
   .app { height: 100vh; display: flex; flex-direction: column; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: #0b0d12; color: #e9eefc; }
   .topbar { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid #1b2230; background: #0b0d12; }
   .brand { font-weight: 700; letter-spacing: 0.2px; }
@@ -427,8 +394,12 @@
   .modalBody { opacity: 0.9; margin-bottom: 12px; }
   .modalActions { display: flex; gap: 8px; justify-content: flex-end; }
   .callBar { position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 55; display: flex; justify-content: space-between; align-items: center; border: 1px solid #1b2230; background: #0b0d12; border-radius: 14px; padding: 12px 12px; gap: 12px; }
-  .videoStage { position: fixed; left: 12px; right: 12px; bottom: 86px; top: 70px; z-index: 54; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .videoPane { border: 1px solid #1b2230; background: #0b0d12; border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
+  .callInfo { display: flex; flex-direction: column; gap: 6px; }
+  .callTitle { font-weight: 600; }
+  .talkGroup { display: flex; flex-wrap: wrap; gap: 8px; }
+  .talk { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .videoStage { position: fixed; left: 12px; right: 316px; bottom: 86px; top: 70px; z-index: 54; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; overflow: auto; }
+  .videoPane { border: 1px solid #1b2230; background: #0b0d12; border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; min-height: 200px; }
   .videoLabel { padding: 10px 12px; border-bottom: 1px solid #1b2230; font-weight: 600; }
   .video { width: 100%; height: 100%; object-fit: contain; background: #000; flex: 1; }
   .videoPlaceholder { flex: 1; display: grid; place-items: center; opacity: 0.7; }

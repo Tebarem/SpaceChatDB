@@ -10,12 +10,7 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default __t.row({
-  roomId: __t.uuid().name("room_id"),
-  from: __t.identity(),
-  seq: __t.u32(),
-  sampleRate: __t.u32().name("sample_rate"),
-  channels: __t.u8(),
-  rms: __t.f32(),
-  pcm16Le: __t.byteArray().name("pcm_16_le"),
-});
+export default {
+  roomId: __t.uuid(),
+  target: __t.identity(),
+};

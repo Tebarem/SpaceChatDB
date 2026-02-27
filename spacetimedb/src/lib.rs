@@ -27,22 +27,36 @@ pub enum CallType {
 }
 
 #[derive(SpacetimeType, Debug, Copy, Clone, PartialEq, Eq)]
-pub enum CallState {
-    Ringing,
-    Active,
+pub enum ParticipantState {
+    Invited,
+    Joined,
 }
 
-#[spacetimedb::table(accessor = call_session, public)]
+#[spacetimedb::table(accessor = call_room, public)]
 #[derive(Clone)]
-pub struct CallSession {
+pub struct CallRoom {
     #[primary_key]
-    pub session_id: Uuid,
+    pub room_id: Uuid,
     pub call_type: CallType,
-    pub state: CallState,
-    pub caller: Identity,
-    pub callee: Identity,
     pub created_at: Timestamp,
-    pub answered_at: Option<Timestamp>,
+    pub creator: Identity,
+}
+
+#[spacetimedb::table(
+    accessor = call_participant, public,
+    index(accessor = by_room, btree(columns = [room_id])),
+    index(accessor = by_identity, btree(columns = [identity]))
+)]
+#[derive(Clone)]
+pub struct CallParticipant {
+    #[primary_key]
+    #[auto_inc]
+    pub id: u64,
+    pub room_id: Uuid,
+    pub identity: Identity,
+    pub state: ParticipantState,
+    pub invited_by: Identity,
+    pub joined_at: Option<Timestamp>,
 }
 
 /*
@@ -75,9 +89,8 @@ pub struct MediaSettings {
 #[spacetimedb::table(accessor = audio_frame_event, public, event)]
 #[derive(Clone)]
 pub struct AudioFrameEvent {
-    pub session_id: Uuid,
+    pub room_id: Uuid,
     pub from: Identity,
-    pub to: Identity,
     pub seq: u32,
     pub sample_rate: u32,
     pub channels: u8,
@@ -88,9 +101,8 @@ pub struct AudioFrameEvent {
 #[spacetimedb::table(accessor = video_frame_event, public, event)]
 #[derive(Clone)]
 pub struct VideoFrameEvent {
-    pub session_id: Uuid,
+    pub room_id: Uuid,
     pub from: Identity,
-    pub to: Identity,
     pub seq: u32,
     pub width: u16,
     pub height: u16,
@@ -149,14 +161,29 @@ pub fn client_disconnected(ctx: &ReducerContext) {
     let who = ctx.sender();
     ctx.db.user().identity().delete(&who);
 
-    let mut to_delete: Vec<Uuid> = Vec::new();
-    for s in ctx.db.call_session().iter() {
-        if s.caller == who || s.callee == who {
-            to_delete.push(s.session_id);
-        }
+    // Collect all participant rows for this user in one pass
+    let participant_rows: Vec<CallParticipant> = ctx
+        .db
+        .call_participant()
+        .by_identity()
+        .filter(&who)
+        .collect();
+
+    // Find rooms where they were Joined (for cleanup check)
+    let joined_rooms: Vec<Uuid> = participant_rows
+        .iter()
+        .filter(|p| p.state == ParticipantState::Joined)
+        .map(|p| p.room_id)
+        .collect();
+
+    // Delete all participant rows for this user
+    for p in &participant_rows {
+        ctx.db.call_participant().id().delete(&p.id);
     }
-    for id in to_delete {
-        ctx.db.call_session().session_id().delete(&id);
+
+    // Run cleanup for rooms they were joined in
+    for room_id in joined_rooms {
+        cleanup_room_if_empty(ctx, room_id);
     }
 }
 
@@ -208,122 +235,232 @@ pub fn send_message(ctx: &ReducerContext, text: String) -> Result<(), String> {
 }
 
 #[spacetimedb::reducer]
-pub fn request_call(ctx: &ReducerContext, target: Identity, call_type: CallType) -> Result<(), String> {
-    let caller = ctx.sender();
+pub fn create_room(
+    ctx: &ReducerContext,
+    targets: Vec<Identity>,
+    call_type: CallType,
+) -> Result<(), String> {
+    let creator = ctx.sender();
     let now = ctx.timestamp;
 
-    if caller == target {
-        return Err("Cannot call yourself".to_string());
+    if targets.is_empty() {
+        return Err("Need at least one target".to_string());
     }
+    if targets.len() > 15 {
+        return Err("Cannot invite more than 15 targets".to_string());
+    }
+
+    // Creator must not be Joined in another room
+    for p in ctx.db.call_participant().by_identity().filter(&creator) {
+        if p.state == ParticipantState::Joined {
+            return Err("You are already in a call".to_string());
+        }
+    }
+
+    for target in &targets {
+        if *target == creator {
+            return Err("Cannot invite yourself".to_string());
+        }
+        if ctx.db.user().identity().find(target).is_none() {
+            return Err("A target is not online".to_string());
+        }
+        // Target must not be Joined elsewhere
+        for p in ctx.db.call_participant().by_identity().filter(target) {
+            if p.state == ParticipantState::Joined {
+                return Err("A target is already in a call".to_string());
+            }
+        }
+    }
+
+    let room_id = ctx
+        .new_uuid_v7()
+        .or_else(|_| ctx.new_uuid_v4())
+        .map_err(|_| "Failed to generate room id".to_string())?;
+
+    ctx.db.call_room().insert(CallRoom {
+        room_id,
+        call_type,
+        created_at: now,
+        creator,
+    });
+
+    ctx.db.call_participant().insert(CallParticipant {
+        id: 0,
+        room_id,
+        identity: creator,
+        state: ParticipantState::Joined,
+        invited_by: creator,
+        joined_at: Some(now),
+    });
+
+    for target in targets {
+        ctx.db.call_participant().insert(CallParticipant {
+            id: 0,
+            room_id,
+            identity: target,
+            state: ParticipantState::Invited,
+            invited_by: creator,
+            joined_at: None,
+        });
+    }
+
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn invite_to_room(
+    ctx: &ReducerContext,
+    room_id: Uuid,
+    target: Identity,
+) -> Result<(), String> {
+    let who = ctx.sender();
+
+    // Caller must be Joined in that room
+    let is_joined = ctx
+        .db
+        .call_participant()
+        .by_room()
+        .filter(&room_id)
+        .any(|p| p.identity == who && p.state == ParticipantState::Joined);
+    if !is_joined {
+        return Err("You are not joined in that room".to_string());
+    }
+
     if ctx.db.user().identity().find(&target).is_none() {
         return Err("Target is not online".to_string());
     }
 
-    for s in ctx.db.call_session().iter() {
-        if (s.caller == caller || s.callee == caller || s.caller == target || s.callee == target)
-            && (s.state == CallState::Ringing || s.state == CallState::Active)
-        {
-            return Err("Caller or callee is already in a call".to_string());
+    // Target must not be Joined elsewhere
+    for p in ctx.db.call_participant().by_identity().filter(&target) {
+        if p.state == ParticipantState::Joined {
+            return Err("Target is already in a call".to_string());
         }
     }
 
-    let session_id = ctx
-        .new_uuid_v7()
-        .or_else(|_| ctx.new_uuid_v4())
-        .map_err(|_| "Failed to generate session id".to_string())?;
+    // Target not already in this room
+    let already_in_room = ctx
+        .db
+        .call_participant()
+        .by_room()
+        .filter(&room_id)
+        .any(|p| p.identity == target);
+    if already_in_room {
+        return Err("Target is already in this room".to_string());
+    }
 
-    ctx.db.call_session().insert(CallSession {
-        session_id,
-        call_type,
-        state: CallState::Ringing,
-        caller,
-        callee: target,
-        created_at: now,
-        answered_at: None,
+    ctx.db.call_participant().insert(CallParticipant {
+        id: 0,
+        room_id,
+        identity: target,
+        state: ParticipantState::Invited,
+        invited_by: who,
+        joined_at: None,
     });
 
     Ok(())
 }
 
 #[spacetimedb::reducer]
-pub fn accept_call(ctx: &ReducerContext, session_id: Uuid) -> Result<(), String> {
+pub fn join_room(ctx: &ReducerContext, room_id: Uuid) -> Result<(), String> {
     let who = ctx.sender();
     let now = ctx.timestamp;
 
-    let sess = ctx
+    // Find the invited row for this user in this room
+    let participant = ctx
         .db
-        .call_session()
-        .session_id()
-        .find(&session_id)
-        .ok_or_else(|| "Call session not found".to_string())?;
+        .call_participant()
+        .by_room()
+        .filter(&room_id)
+        .find(|p| p.identity == who)
+        .ok_or_else(|| "Not invited to this room".to_string())?;
 
-    if sess.callee != who {
-        return Err("Only the callee can accept".to_string());
-    }
-    if sess.state != CallState::Ringing {
-        return Err("Call is not ringing".to_string());
+    if participant.state != ParticipantState::Invited {
+        return Err("Not in invited state".to_string());
     }
 
-    let mut updated = sess.clone();
-    updated.state = CallState::Active;
-    updated.answered_at = Some(now);
-    ctx.db.call_session().session_id().update(updated);
+    // Must not be Joined in a different room
+    for p in ctx.db.call_participant().by_identity().filter(&who) {
+        if p.room_id != room_id && p.state == ParticipantState::Joined {
+            return Err("Already joined in another room".to_string());
+        }
+    }
+
+    ctx.db.call_participant().id().update(CallParticipant {
+        state: ParticipantState::Joined,
+        joined_at: Some(now),
+        ..participant
+    });
+
     Ok(())
 }
 
 #[spacetimedb::reducer]
-pub fn decline_call(ctx: &ReducerContext, session_id: Uuid) -> Result<(), String> {
+pub fn decline_invite(ctx: &ReducerContext, room_id: Uuid) -> Result<(), String> {
     let who = ctx.sender();
 
-    let sess = ctx
+    let participant = ctx
         .db
-        .call_session()
-        .session_id()
-        .find(&session_id)
-        .ok_or_else(|| "Call session not found".to_string())?;
+        .call_participant()
+        .by_room()
+        .filter(&room_id)
+        .find(|p| p.identity == who)
+        .ok_or_else(|| "Not in this room".to_string())?;
 
-    if sess.callee != who {
-        return Err("Only the callee can decline".to_string());
+    if participant.state != ParticipantState::Invited {
+        return Err("Not in invited state".to_string());
     }
 
-    ctx.db.call_session().session_id().delete(&session_id);
+    ctx.db.call_participant().id().delete(&participant.id);
     Ok(())
 }
 
 #[spacetimedb::reducer]
-pub fn end_call(ctx: &ReducerContext, session_id: Uuid) -> Result<(), String> {
+pub fn leave_room(ctx: &ReducerContext, room_id: Uuid) -> Result<(), String> {
     let who = ctx.sender();
 
-    let sess = ctx
+    let participant = ctx
         .db
-        .call_session()
-        .session_id()
-        .find(&session_id)
-        .ok_or_else(|| "Call session not found".to_string())?;
+        .call_participant()
+        .by_room()
+        .filter(&room_id)
+        .find(|p| p.identity == who)
+        .ok_or_else(|| "Not in this room".to_string())?;
 
-    if sess.caller != who && sess.callee != who {
-        return Err("Only a participant can end this call".to_string());
-    }
+    ctx.db.call_participant().id().delete(&participant.id);
+    cleanup_room_if_empty(ctx, room_id);
 
-    ctx.db.call_session().session_id().delete(&session_id);
     Ok(())
 }
 
-fn other_party(sess: &CallSession, who: Identity) -> Option<Identity> {
-    if sess.caller == who {
-        Some(sess.callee)
-    } else if sess.callee == who {
-        Some(sess.caller)
-    } else {
-        None
+fn cleanup_room_if_empty(ctx: &ReducerContext, room_id: Uuid) {
+    let has_joined = ctx
+        .db
+        .call_participant()
+        .by_room()
+        .filter(&room_id)
+        .any(|p| p.state == ParticipantState::Joined);
+
+    if !has_joined {
+        // Delete all remaining Invited rows
+        let to_delete: Vec<u64> = ctx
+            .db
+            .call_participant()
+            .by_room()
+            .filter(&room_id)
+            .map(|p| p.id)
+            .collect();
+        for id in to_delete {
+            ctx.db.call_participant().id().delete(&id);
+        }
+        // Delete the room itself
+        ctx.db.call_room().room_id().delete(&room_id);
     }
 }
 
 #[spacetimedb::reducer]
 pub fn send_audio_frame(
     ctx: &ReducerContext,
-    session_id: Uuid,
-    to: Identity,
+    room_id: Uuid,
     seq: u32,
     sample_rate: u32,
     channels: u8,
@@ -332,20 +469,14 @@ pub fn send_audio_frame(
 ) -> Result<(), String> {
     let who = ctx.sender();
 
-    let sess = ctx
+    let is_joined = ctx
         .db
-        .call_session()
-        .session_id()
-        .find(&session_id)
-        .ok_or_else(|| "Call session not found".to_string())?;
-
-    if sess.state != CallState::Active {
-        return Err("Call is not active".to_string());
-    }
-
-    let peer = other_party(&sess, who).ok_or_else(|| "Not a participant".to_string())?;
-    if peer != to {
-        return Err("Invalid recipient".to_string());
+        .call_participant()
+        .by_room()
+        .filter(&room_id)
+        .any(|p| p.identity == who && p.state == ParticipantState::Joined);
+    if !is_joined {
+        return Err("Not a joined participant".to_string());
     }
 
     if pcm16le.len() > 64_000 {
@@ -353,9 +484,8 @@ pub fn send_audio_frame(
     }
 
     ctx.db.audio_frame_event().insert(AudioFrameEvent {
-        session_id,
+        room_id,
         from: who,
-        to,
         seq,
         sample_rate,
         channels,
@@ -369,8 +499,7 @@ pub fn send_audio_frame(
 #[spacetimedb::reducer]
 pub fn send_video_frame(
     ctx: &ReducerContext,
-    session_id: Uuid,
-    to: Identity,
+    room_id: Uuid,
     seq: u32,
     width: u16,
     height: u16,
@@ -379,23 +508,25 @@ pub fn send_video_frame(
 ) -> Result<(), String> {
     let who = ctx.sender();
 
-    let sess = ctx
+    let room = ctx
         .db
-        .call_session()
-        .session_id()
-        .find(&session_id)
-        .ok_or_else(|| "Call session not found".to_string())?;
+        .call_room()
+        .room_id()
+        .find(&room_id)
+        .ok_or_else(|| "Room not found".to_string())?;
 
-    if sess.state != CallState::Active {
-        return Err("Call is not active".to_string());
-    }
-    if sess.call_type != CallType::Video {
-        return Err("Not a video call".to_string());
+    if room.call_type != CallType::Video {
+        return Err("Not a video room".to_string());
     }
 
-    let peer = other_party(&sess, who).ok_or_else(|| "Not a participant".to_string())?;
-    if peer != to {
-        return Err("Invalid recipient".to_string());
+    let is_joined = ctx
+        .db
+        .call_participant()
+        .by_room()
+        .filter(&room_id)
+        .any(|p| p.identity == who && p.state == ParticipantState::Joined);
+    if !is_joined {
+        return Err("Not a joined participant".to_string());
     }
 
     if jpeg.len() > 512_000 {
@@ -403,9 +534,8 @@ pub fn send_video_frame(
     }
 
     ctx.db.video_frame_event().insert(VideoFrameEvent {
-        session_id,
+        room_id,
         from: who,
-        to,
         seq,
         width,
         height,

@@ -11,9 +11,8 @@ import {
 } from "spacetimedb";
 
 export default __t.row({
-  sessionId: __t.uuid().name("session_id"),
+  roomId: __t.uuid().name("room_id"),
   from: __t.identity(),
-  to: __t.identity(),
   seq: __t.u32(),
   width: __t.u16(),
   height: __t.u16(),

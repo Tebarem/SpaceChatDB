@@ -11,9 +11,8 @@ import {
 } from "spacetimedb";
 
 export const AudioFrameEvent = __t.object("AudioFrameEvent", {
-  sessionId: __t.uuid(),
+  roomId: __t.uuid(),
   from: __t.identity(),
-  to: __t.identity(),
   seq: __t.u32(),
   sampleRate: __t.u32(),
   channels: __t.u8(),
@@ -22,27 +21,27 @@ export const AudioFrameEvent = __t.object("AudioFrameEvent", {
 });
 export type AudioFrameEvent = __Infer<typeof AudioFrameEvent>;
 
-export const CallSession = __t.object("CallSession", {
-  sessionId: __t.uuid(),
+export const CallParticipant = __t.object("CallParticipant", {
+  id: __t.u64(),
+  roomId: __t.uuid(),
+  identity: __t.identity(),
+  get state() {
+    return ParticipantState;
+  },
+  invitedBy: __t.identity(),
+  joinedAt: __t.option(__t.timestamp()),
+});
+export type CallParticipant = __Infer<typeof CallParticipant>;
+
+export const CallRoom = __t.object("CallRoom", {
+  roomId: __t.uuid(),
   get callType() {
     return CallType;
   },
-  get state() {
-    return CallState;
-  },
-  caller: __t.identity(),
-  callee: __t.identity(),
   createdAt: __t.timestamp(),
-  answeredAt: __t.option(__t.timestamp()),
+  creator: __t.identity(),
 });
-export type CallSession = __Infer<typeof CallSession>;
-
-// The tagged union or sum type for the algebraic type `CallState`.
-export const CallState = __t.enum("CallState", {
-  Ringing: __t.unit(),
-  Active: __t.unit(),
-});
-export type CallState = __Infer<typeof CallState>;
+export type CallRoom = __Infer<typeof CallRoom>;
 
 // The tagged union or sum type for the algebraic type `CallType`.
 export const CallType = __t.enum("CallType", {
@@ -74,6 +73,13 @@ export const MediaSettings = __t.object("MediaSettings", {
 });
 export type MediaSettings = __Infer<typeof MediaSettings>;
 
+// The tagged union or sum type for the algebraic type `ParticipantState`.
+export const ParticipantState = __t.enum("ParticipantState", {
+  Invited: __t.unit(),
+  Joined: __t.unit(),
+});
+export type ParticipantState = __Infer<typeof ParticipantState>;
+
 export const User = __t.object("User", {
   identity: __t.identity(),
   nickname: __t.string(),
@@ -82,9 +88,8 @@ export const User = __t.object("User", {
 export type User = __Infer<typeof User>;
 
 export const VideoFrameEvent = __t.object("VideoFrameEvent", {
-  sessionId: __t.uuid(),
+  roomId: __t.uuid(),
   from: __t.identity(),
-  to: __t.identity(),
   seq: __t.u32(),
   width: __t.u16(),
   height: __t.u16(),

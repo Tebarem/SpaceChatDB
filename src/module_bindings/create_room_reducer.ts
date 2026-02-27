@@ -15,7 +15,7 @@ import {
 } from "./types";
 
 export default {
-  target: __t.identity(),
+  targets: __t.array(__t.identity()),
   get callType() {
     return CallType;
   },

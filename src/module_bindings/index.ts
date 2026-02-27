@@ -34,10 +34,11 @@ import {
 } from "spacetimedb";
 
 // Import all reducer arg schemas
-import AcceptCallReducer from "./accept_call_reducer";
-import DeclineCallReducer from "./decline_call_reducer";
-import EndCallReducer from "./end_call_reducer";
-import RequestCallReducer from "./request_call_reducer";
+import CreateRoomReducer from "./create_room_reducer";
+import DeclineInviteReducer from "./decline_invite_reducer";
+import InviteToRoomReducer from "./invite_to_room_reducer";
+import JoinRoomReducer from "./join_room_reducer";
+import LeaveRoomReducer from "./leave_room_reducer";
 import SendAudioFrameReducer from "./send_audio_frame_reducer";
 import SendMessageReducer from "./send_message_reducer";
 import SendVideoFrameReducer from "./send_video_frame_reducer";
@@ -47,7 +48,8 @@ import SetNicknameReducer from "./set_nickname_reducer";
 
 // Import all table schema definitions
 import AudioFrameEventRow from "./audio_frame_event_table";
-import CallSessionRow from "./call_session_table";
+import CallParticipantRow from "./call_participant_table";
+import CallRoomRow from "./call_room_table";
 import ChatMessageRow from "./chat_message_table";
 import MediaSettingsRow from "./media_settings_table";
 import UserRow from "./user_table";
@@ -65,17 +67,34 @@ const tablesSchema = __schema({
     ],
     event: true,
   }, AudioFrameEventRow),
-  call_session: __table({
-    name: 'call_session',
+  call_participant: __table({
+    name: 'call_participant',
     indexes: [
-      { name: 'session_id', algorithm: 'btree', columns: [
-        'sessionId',
+      { name: 'id', algorithm: 'btree', columns: [
+        'id',
+      ] },
+      { name: 'by_identity', algorithm: 'btree', columns: [
+        'identity',
+      ] },
+      { name: 'by_room', algorithm: 'btree', columns: [
+        'roomId',
       ] },
     ],
     constraints: [
-      { name: 'call_session_session_id_key', constraint: 'unique', columns: ['sessionId'] },
+      { name: 'call_participant_id_key', constraint: 'unique', columns: ['id'] },
     ],
-  }, CallSessionRow),
+  }, CallParticipantRow),
+  call_room: __table({
+    name: 'call_room',
+    indexes: [
+      { name: 'room_id', algorithm: 'btree', columns: [
+        'roomId',
+      ] },
+    ],
+    constraints: [
+      { name: 'call_room_room_id_key', constraint: 'unique', columns: ['roomId'] },
+    ],
+  }, CallRoomRow),
   chat_message: __table({
     name: 'chat_message',
     indexes: [
@@ -121,10 +140,11 @@ const tablesSchema = __schema({
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
-  __reducerSchema("accept_call", AcceptCallReducer),
-  __reducerSchema("decline_call", DeclineCallReducer),
-  __reducerSchema("end_call", EndCallReducer),
-  __reducerSchema("request_call", RequestCallReducer),
+  __reducerSchema("create_room", CreateRoomReducer),
+  __reducerSchema("decline_invite", DeclineInviteReducer),
+  __reducerSchema("invite_to_room", InviteToRoomReducer),
+  __reducerSchema("join_room", JoinRoomReducer),
+  __reducerSchema("leave_room", LeaveRoomReducer),
   __reducerSchema("send_audio_frame", SendAudioFrameReducer),
   __reducerSchema("send_message", SendMessageReducer),
   __reducerSchema("send_video_frame", SendVideoFrameReducer),

@@ -11,8 +11,7 @@ import {
 } from "spacetimedb";
 
 export default {
-  sessionId: __t.uuid(),
-  to: __t.identity(),
+  roomId: __t.uuid(),
   seq: __t.u32(),
   sampleRate: __t.u32(),
   channels: __t.u8(),

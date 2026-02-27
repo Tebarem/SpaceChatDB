@@ -6,19 +6,21 @@
 import { type Infer as __Infer } from "spacetimedb";
 
 // Import all reducer arg schemas
-import AcceptCallReducer from "../accept_call_reducer";
-import DeclineCallReducer from "../decline_call_reducer";
-import EndCallReducer from "../end_call_reducer";
-import RequestCallReducer from "../request_call_reducer";
+import CreateRoomReducer from "../create_room_reducer";
+import DeclineInviteReducer from "../decline_invite_reducer";
+import InviteToRoomReducer from "../invite_to_room_reducer";
+import JoinRoomReducer from "../join_room_reducer";
+import LeaveRoomReducer from "../leave_room_reducer";
 import SendAudioFrameReducer from "../send_audio_frame_reducer";
 import SendMessageReducer from "../send_message_reducer";
 import SendVideoFrameReducer from "../send_video_frame_reducer";
 import SetNicknameReducer from "../set_nickname_reducer";
 
-export type AcceptCallParams = __Infer<typeof AcceptCallReducer>;
-export type DeclineCallParams = __Infer<typeof DeclineCallReducer>;
-export type EndCallParams = __Infer<typeof EndCallReducer>;
-export type RequestCallParams = __Infer<typeof RequestCallReducer>;
+export type CreateRoomParams = __Infer<typeof CreateRoomReducer>;
+export type DeclineInviteParams = __Infer<typeof DeclineInviteReducer>;
+export type InviteToRoomParams = __Infer<typeof InviteToRoomReducer>;
+export type JoinRoomParams = __Infer<typeof JoinRoomReducer>;
+export type LeaveRoomParams = __Infer<typeof LeaveRoomReducer>;
 export type SendAudioFrameParams = __Infer<typeof SendAudioFrameReducer>;
 export type SendMessageParams = __Infer<typeof SendMessageReducer>;
 export type SendVideoFrameParams = __Infer<typeof SendVideoFrameReducer>;

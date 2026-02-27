@@ -2,7 +2,15 @@ import { browser } from '$app/environment';
 import { writable, get } from 'svelte/store';
 import { DbConnection } from '../module_bindings';
 import type { Identity, Uuid } from 'spacetimedb';
-import { handleAudioEvent, handleVideoEvent, stopCallRuntime } from './callRuntime';
+import {
+  handleAudioEvent,
+  handleVideoEvent,
+  stopCallRuntime,
+  startCallRuntime,
+  addPeer,
+  removePeer,
+  getRuntimePeerHexes
+} from './callRuntime';
 import { mediaSettingsStore, type MediaSettings } from './mediaSettings';
 
 // Stores
@@ -14,7 +22,8 @@ export const actionError = writable<string | null>(null);
 
 export const usersStore = writable<any[]>([]);
 export const messagesStore = writable<any[]>([]);
-export const callSessionsStore = writable<any[]>([]);
+export const callRoomsStore = writable<any[]>([]);
+export const callParticipantsStore = writable<any[]>([]);
 
 export const incomingCallStore = writable<any | null>(null);
 export const activeCallStore = writable<any | null>(null);
@@ -141,25 +150,6 @@ function removeByKey<T extends Record<string, any>>(arr: T[], key: string, value
   return arr.filter((r) => (r[key]?.toString?.() ?? String(r[key])) !== v);
 }
 
-function sessionIdStr(sess: any): string {
-  const id = sess?.session_id ?? sess?.sessionId;
-  return id?.toString?.() ?? String(id ?? '');
-}
-
-function upsertCallSession(arr: any[], row: any): any[] {
-  const id = sessionIdStr(row);
-  const idx = arr.findIndex((r) => sessionIdStr(r) === id);
-  if (idx === -1) return [...arr, row];
-  const copy = arr.slice();
-  copy[idx] = row;
-  return copy;
-}
-
-function removeCallSession(arr: any[], row: any): any[] {
-  const id = sessionIdStr(row);
-  return arr.filter((r) => sessionIdStr(r) !== id);
-}
-
 function upsertChatMessage(arr: any[], row: any): any[] {
   const id = msgIdOf(row);
   if (!id) return arr;
@@ -201,13 +191,11 @@ function safe<T extends (...args: any[]) => any>(name: string, fn: T): T {
 
 /**
  * Read a column from a row using multiple possible key spellings.
- * (snake_case vs camelCase vs a couple legacy variants)
  */
 function readField(row: any, keys: string[]): any {
   for (const k of keys) {
     if (row && (k in row)) return row[k];
   }
-  // Also try case-insensitive match
   if (row && typeof row === 'object') {
     const wanted = new Set(keys.map((k) => k.toLowerCase()));
     for (const actual of Object.keys(row)) {
@@ -217,10 +205,6 @@ function readField(row: any, keys: string[]): any {
   return undefined;
 }
 
-/**
- * Strict, no-default numeric parsing that supports common SpacetimeDB TS wrappers.
- * Accepts: number, bigint, numeric string, {value}, {inner}, {v}, {val}, toNumber(), toBigInt(), single-key unit wrapper, toString()
- */
 function mustNumber(raw: any, field: string, rowForDebug?: any): number {
   const fail = () => {
     const keys = rowForDebug && typeof rowForDebug === 'object' ? Object.keys(rowForDebug).join(', ') : '';
@@ -248,7 +232,6 @@ function mustNumber(raw: any, field: string, rowForDebug?: any): number {
   }
 
   if (raw && typeof raw === 'object') {
-    // common wrappers
     if ('value' in raw) return mustNumber((raw as any).value, field, rowForDebug);
     if ('inner' in raw) return mustNumber((raw as any).inner, field, rowForDebug);
     if ('v' in raw) return mustNumber((raw as any).v, field, rowForDebug);
@@ -264,11 +247,9 @@ function mustNumber(raw: any, field: string, rowForDebug?: any): number {
       if (typeof b === 'bigint') return Number(b);
     }
 
-    // single-key object wrapper { U32: 16000 } or { u32: 16000 }
     const keys = Object.keys(raw);
     if (keys.length === 1) {
       const v = (raw as any)[keys[0]];
-      // unit variants might be {} / null; ignore those
       if (v != null) {
         try {
           return mustNumber(v, field, rowForDebug);
@@ -330,15 +311,99 @@ function applySettingsRow(row: any) {
   mediaSettingsStore.set(s);
 }
 
+function tagLower(v: any): string {
+  if (!v) return '';
+  if (typeof v === 'string') return v.toLowerCase();
+  if (typeof v === 'object') {
+    if (typeof v.tag === 'string') return v.tag.toLowerCase();
+    const keys = Object.keys(v);
+    if (keys.length === 1) return keys[0].toLowerCase();
+  }
+  return String(v).toLowerCase();
+}
+
+function roomIdStr(item: any): string {
+  const id = item?.room_id ?? item?.roomId;
+  return id?.toString?.() ?? String(id ?? '');
+}
+
+function recomputeCallUiFromStores(conn: DbConnection | null, me: Identity | null) {
+  if (!me || !conn) return;
+
+  const meHex = me.toHexString();
+  const participants = get(callParticipantsStore);
+  const rooms = get(callRoomsStore);
+
+  // Find my Invited row
+  const myInvited =
+    participants.find(
+      (p) =>
+        (p.identity?.toHexString?.() ?? '') === meHex && tagLower(p.state) === 'invited'
+    ) ?? null;
+  incomingCallStore.set(myInvited);
+
+  // Find my Joined row
+  const myJoined =
+    participants.find(
+      (p) =>
+        (p.identity?.toHexString?.() ?? '') === meHex && tagLower(p.state) === 'joined'
+    ) ?? null;
+
+  let newActiveRoom: any = null;
+  if (myJoined) {
+    const rid = roomIdStr(myJoined);
+    newActiveRoom = rooms.find((r) => roomIdStr(r) === rid) ?? null;
+  }
+
+  const prevActive = get(activeCallStore);
+  const prevRoomId = roomIdStr(prevActive);
+  const newRoomId = roomIdStr(newActiveRoom);
+
+  if (prevRoomId !== newRoomId) {
+    activeCallStore.set(newActiveRoom);
+    if (!newActiveRoom) {
+      stopCallRuntime();
+    } else {
+      const joinedPeers = participants.filter(
+        (p) =>
+          (p.identity?.toHexString?.() ?? '') !== meHex &&
+          tagLower(p.state) === 'joined' &&
+          roomIdStr(p) === newRoomId
+      );
+      void startCallRuntime(newActiveRoom, joinedPeers, conn, me);
+    }
+  } else if (newActiveRoom) {
+    // Same room — diff the peer list
+    const currentPeerHexes = new Set(getRuntimePeerHexes());
+    const joinedPeers = participants.filter(
+      (p) =>
+        (p.identity?.toHexString?.() ?? '') !== meHex &&
+        tagLower(p.state) === 'joined' &&
+        roomIdStr(p) === newRoomId
+    );
+    const newPeerHexes = new Set(
+      joinedPeers.map((p) => p.identity?.toHexString?.() ?? '').filter(Boolean)
+    );
+
+    for (const hex of newPeerHexes) {
+      if (!currentPeerHexes.has(hex)) addPeer(hex);
+    }
+    for (const hex of currentPeerHexes) {
+      if (!newPeerHexes.has(hex)) removePeer(hex);
+    }
+  }
+}
+
 function attachRowCallbacks(conn: DbConnection) {
   const userT = getCoreTable(conn, 'user', 'user');
   const chatT = getCoreTable(conn, 'chat_message', 'chatMessage');
-  const callT = getCoreTable(conn, 'call_session', 'callSession');
+  const roomT = getCoreTable(conn, 'call_room', 'callRoom');
+  const participantT = getCoreTable(conn, 'call_participant', 'callParticipant');
 
-  if (!userT || !chatT || !callT) {
+  if (!userT || !chatT || !roomT || !participantT) {
     const keys = Object.keys(((conn as any).db ?? {})).join(', ');
     connectionError.set(
-      `Missing core table handles. user=${!!userT}, chat_message=${!!chatT}, call_session=${!!callT}. db keys: ${keys}`
+      `Missing core table handles. user=${!!userT}, chat_message=${!!chatT}, call_room=${!!roomT}, call_participant=${!!participantT}. db keys: ${keys}`
     );
     return;
   }
@@ -349,16 +414,47 @@ function attachRowCallbacks(conn: DbConnection) {
 
   chatT.onInsert(safe('chat_message.onInsert', (_e: any, row: any) => messagesStore.update((m) => upsertChatMessage(m, row))));
 
-  callT.onInsert(safe('call_session.onInsert', (_e: any, row: any) => callSessionsStore.update((s) => upsertCallSession(s, row))));
-  callT.onUpdate(safe('call_session.onUpdate', (_e: any, _old: any, row: any) => callSessionsStore.update((s) => upsertCallSession(s, row))));
-  callT.onDelete(
-    safe('call_session.onDelete', (_e: any, row: any) => {
-      callSessionsStore.update((s) => removeCallSession(s, row));
-      const active = get(activeCallStore);
-      if (active && sessionIdStr(active) === sessionIdStr(row)) {
-        activeCallStore.set(null);
-        stopCallRuntime();
-      }
+  const triggerCallUi = () => {
+    const c = get(connStore);
+    const me = get(identityStore);
+    recomputeCallUiFromStores(c, me);
+  };
+
+  roomT.onInsert(
+    safe('call_room.onInsert', (_e: any, row: any) => {
+      callRoomsStore.update((r) => upsertByKey(r, 'room_id', row));
+      triggerCallUi();
+    })
+  );
+  roomT.onUpdate(
+    safe('call_room.onUpdate', (_e: any, _old: any, row: any) => {
+      callRoomsStore.update((r) => upsertByKey(r, 'room_id', row));
+      triggerCallUi();
+    })
+  );
+  roomT.onDelete(
+    safe('call_room.onDelete', (_e: any, row: any) => {
+      callRoomsStore.update((r) => removeByKey(r, 'room_id', row.room_id ?? row.roomId));
+      triggerCallUi();
+    })
+  );
+
+  participantT.onInsert(
+    safe('call_participant.onInsert', (_e: any, row: any) => {
+      callParticipantsStore.update((p) => upsertByKey(p, 'id', row));
+      triggerCallUi();
+    })
+  );
+  participantT.onUpdate(
+    safe('call_participant.onUpdate', (_e: any, _old: any, row: any) => {
+      callParticipantsStore.update((p) => upsertByKey(p, 'id', row));
+      triggerCallUi();
+    })
+  );
+  participantT.onDelete(
+    safe('call_participant.onDelete', (_e: any, row: any) => {
+      callParticipantsStore.update((p) => removeByKey(p, 'id', row.id));
+      triggerCallUi();
     })
   );
 
@@ -447,12 +543,14 @@ export function connectStdb() {
           .onApplied(() => {
             const userT = getCoreTable(conn, 'user', 'user');
             const chatT = getCoreTable(conn, 'chat_message', 'chatMessage');
-            const callT = getCoreTable(conn, 'call_session', 'callSession');
+            const roomT = getCoreTable(conn, 'call_room', 'callRoom');
+            const participantT = getCoreTable(conn, 'call_participant', 'callParticipant');
             const settingsT = findDbTable(conn, ['media_settings', 'mediaSettings', 'MediaSettings']);
 
             usersStore.set(userT ? Array.from(userT.iter()) : []);
             messagesStore.set(chatT ? uniqueMessages(Array.from(chatT.iter()) as any[]) : []);
-            callSessionsStore.set(callT ? Array.from(callT.iter()) : []);
+            callRoomsStore.set(roomT ? Array.from(roomT.iter()) : []);
+            callParticipantsStore.set(participantT ? Array.from(participantT.iter()) : []);
 
             if (!settingsT) {
               mediaSettingsStore.set(null);
@@ -506,6 +604,8 @@ export function connectStdb() {
       identityStore.set(null);
       incomingCallStore.set(null);
       activeCallStore.set(null);
+      callRoomsStore.set([]);
+      callParticipantsStore.set([]);
       stopCallRuntime();
       mediaSettingsStore.set(null);
 
@@ -515,7 +615,6 @@ export function connectStdb() {
     .build();
 }
 
-// Reducers you already use elsewhere (leave as-is)
 export function sendChat(text: string) {
   const conn = get(connStore);
   if (!conn) return Promise.resolve();
@@ -550,35 +649,15 @@ function callTypeEncodings(callType: 'Voice' | 'Video') {
   ];
 }
 
-export async function requestCall(target: Identity, callType: 'Voice' | 'Video') {
-  const conn = get(connStore);
-  if (!conn) return;
-
-  if (!get(mediaSettingsStore)) {
-    actionError.set('Cannot place call: media_settings singleton (id=1) not loaded');
-    return;
-  }
-
-  let lastErr: any = null;
-
-  for (const ct of callTypeEncodings(callType)) {
-    const args: any = { target, call_type: ct, callType: ct };
-    try {
-      await Promise.resolve(callReducerArgs(conn, 'request_call', 'requestCall', args));
-      actionError.set(null);
-      return;
-    } catch (e) {
-      lastErr = e;
-      if (!looksLikeSumTypeError(e)) throw e;
-    }
-  }
-
-  actionError.set(`request_call failed. Last: ${String(lastErr?.message ?? lastErr)}`);
-}
-
 function shouldSwallow(e: any): boolean {
   const msg = String(e?.message ?? e);
-  return msg.includes('Call session not found') || msg.includes('Call is not active');
+  return (
+    msg.includes('Room not found') ||
+    msg.includes('Not a joined participant') ||
+    msg.includes('Call session not found') ||
+    msg.includes('Call is not active') ||
+    msg.includes('Not in this room')
+  );
 }
 
 function swallow(p: any) {
@@ -590,20 +669,52 @@ function swallow(p: any) {
   }
 }
 
-export function acceptCall(sessionId: Uuid) {
+export async function createRoom(targets: Identity[], callType: 'Voice' | 'Video') {
   const conn = get(connStore);
   if (!conn) return;
-  swallow(callReducerArgs(conn, 'accept_call', 'acceptCall', { session_id: sessionId, sessionId }));
+
+  if (!get(mediaSettingsStore)) {
+    actionError.set('Cannot place call: media_settings singleton (id=1) not loaded');
+    return;
+  }
+
+  let lastErr: any = null;
+
+  for (const ct of callTypeEncodings(callType)) {
+    const args: any = { targets, call_type: ct, callType: ct };
+    try {
+      await Promise.resolve(callReducerArgs(conn, 'create_room', 'createRoom', args));
+      actionError.set(null);
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (!looksLikeSumTypeError(e)) throw e;
+    }
+  }
+
+  actionError.set(`create_room failed. Last: ${String(lastErr?.message ?? lastErr)}`);
 }
 
-export function declineCall(sessionId: Uuid) {
+export function joinRoom(roomId: Uuid) {
   const conn = get(connStore);
   if (!conn) return;
-  swallow(callReducerArgs(conn, 'decline_call', 'declineCall', { session_id: sessionId, sessionId }));
+  swallow(callReducerArgs(conn, 'join_room', 'joinRoom', { room_id: roomId, roomId }));
 }
 
-export function endCall(sessionId: Uuid) {
+export function declineInvite(roomId: Uuid) {
   const conn = get(connStore);
   if (!conn) return;
-  swallow(callReducerArgs(conn, 'end_call', 'endCall', { session_id: sessionId, sessionId }));
+  swallow(callReducerArgs(conn, 'decline_invite', 'declineInvite', { room_id: roomId, roomId }));
+}
+
+export function leaveRoom(roomId: Uuid) {
+  const conn = get(connStore);
+  if (!conn) return;
+  swallow(callReducerArgs(conn, 'leave_room', 'leaveRoom', { room_id: roomId, roomId }));
+}
+
+export function inviteToRoom(roomId: Uuid, target: Identity) {
+  const conn = get(connStore);
+  if (!conn) return;
+  swallow(callReducerArgs(conn, 'invite_to_room', 'inviteToRoom', { room_id: roomId, roomId, target }));
 }

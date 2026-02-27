@@ -4,8 +4,9 @@ import type { Identity } from 'spacetimedb';
 import { mediaSettingsStore, type MediaSettings } from './mediaSettings';
 
 export const localVideoStream = writable<MediaStream | null>(null);
-export const remoteVideoUrl = writable<string | null>(null);
-export const remoteTalking = writable<boolean>(false);
+
+export type PeerState = { hex: string; talking: boolean; videoUrl: string | null };
+export const remotePeers = writable<Map<string, PeerState>>(new Map());
 
 const AUDIO_JITTER_FRAMES = 3;   // ~150ms at 50ms frame time
 const VIDEO_JITTER_FRAMES = 2;   // buffer depth before draining
@@ -13,15 +14,25 @@ const VIDEO_JITTER_FRAMES = 2;   // buffer depth before draining
 type AudioBufferEntry = { pcm: Float32Array; sampleRate: number };
 type VideoBufferEntry = { jpeg: Uint8Array; isIframe: boolean; seq: number };
 
+type PerPeerRuntime = {
+  hex: string;
+  audioCtx: AudioContext;
+  nextPlayTime: number;
+  audioJitterBuffer: Map<number, AudioBufferEntry>;
+  recvSeqAudio: number;
+  audioBufferReady: boolean;
+  talkTimer?: number;
+  videoJitterBuffer: Map<number, VideoBufferEntry>;
+  recvSeqVideo: number;
+  lastVideoIframeSeq: number;
+  lastVideoUrl?: string;
+};
+
 type ActiveRuntime = {
   conn: DbConnection;
   myHex: string;
-  peerId: Identity;
-  peerHex: string;
-  sessionIdStr: string;
+  roomIdStr: string;
   callType: 'Voice' | 'Video';
-  audioCtx: AudioContext;
-  nextPlayTime: number;
   stopFns: (() => void)[];
   sendSeqAudio: number;
   sendSeqVideo: number;
@@ -29,17 +40,9 @@ type ActiveRuntime = {
   camStream?: MediaStream;
   workletNode?: AudioWorkletNode;
   videoTimer?: number;
-  talkTimer?: number;
-  lastRemoteUrl?: string;
   cfg: MediaSettings;
-  // Audio jitter buffer
-  audioJitterBuffer: Map<number, AudioBufferEntry>;
-  recvSeqAudio: number;
-  audioBufferReady: boolean;
-  // Video jitter buffer
-  videoJitterBuffer: Map<number, VideoBufferEntry>;
-  recvSeqVideo: number;
-  lastVideoIframeSeq: number;
+  peers: Map<string, PerPeerRuntime>;
+  micAudioCtx: AudioContext;
 };
 
 let runtime: ActiveRuntime | null = null;
@@ -69,8 +72,8 @@ function idHex(id: Identity) {
   return id.toHexString();
 }
 
-function sessionIdOf(sess: any): string {
-  const id = sess?.session_id ?? sess?.sessionId;
+function roomIdOf(room: any): string {
+  const id = room?.room_id ?? room?.roomId;
   return id?.toString?.() ?? String(id ?? '');
 }
 
@@ -85,14 +88,19 @@ function tagLower(v: any): string {
   return String(v).toLowerCase();
 }
 
-function callTypeOf(sess: any): 'Voice' | 'Video' {
-  const t = tagLower(sess?.call_type ?? sess?.callType);
+function callTypeOf(room: any): 'Voice' | 'Video' {
+  const t = tagLower(room?.call_type ?? room?.callType);
   return t === 'video' ? 'Video' : 'Voice';
 }
 
 function shouldSwallowReducerError(e: any): boolean {
   const msg = String(e?.message ?? e);
-  return msg.includes('Call session not found') || msg.includes('Call is not active');
+  return (
+    msg.includes('Room not found') ||
+    msg.includes('Not a joined participant') ||
+    msg.includes('Call session not found') ||
+    msg.includes('Call is not active')
+  );
 }
 
 function safeSendReducer(conn: DbConnection, snake: string, camel: string, args: any) {
@@ -193,60 +201,124 @@ function scheduleAudio(audioCtx: AudioContext, nextPlayTime: number, pcm: Float3
   return startAt + pcm.length / sampleRate;
 }
 
-function displayVideoFrame(rt: ActiveRuntime, jpeg: Uint8Array) {
+function setTalking(hex: string, value: boolean) {
+  remotePeers.update((m) => {
+    const p = m.get(hex);
+    if (!p) return m;
+    return new Map(m).set(hex, { ...p, talking: value });
+  });
+}
+
+function displayVideoFrame(peer: PerPeerRuntime, jpeg: Uint8Array) {
   const blob = new Blob([jpeg], { type: 'image/jpeg' });
   const url = URL.createObjectURL(blob);
-  if (rt.lastRemoteUrl) URL.revokeObjectURL(rt.lastRemoteUrl);
-  rt.lastRemoteUrl = url;
-  remoteVideoUrl.set(url);
+  if (peer.lastVideoUrl) URL.revokeObjectURL(peer.lastVideoUrl);
+  peer.lastVideoUrl = url;
+  remotePeers.update((m) => {
+    const p = m.get(peer.hex);
+    if (!p) return m;
+    return new Map(m).set(peer.hex, { ...p, videoUrl: url });
+  });
 }
 
-function drainAudioBuffer(rt: ActiveRuntime) {
-  if (!rt.audioBufferReady) return;
-  while (rt.audioJitterBuffer.has(rt.recvSeqAudio)) {
-    const entry = rt.audioJitterBuffer.get(rt.recvSeqAudio)!;
-    rt.audioJitterBuffer.delete(rt.recvSeqAudio);
-    rt.nextPlayTime = scheduleAudio(rt.audioCtx, rt.nextPlayTime, entry.pcm, entry.sampleRate);
-    rt.recvSeqAudio++;
+function drainAudioBuffer(peer: PerPeerRuntime, cfg: MediaSettings) {
+  if (!peer.audioBufferReady) return;
+  while (peer.audioJitterBuffer.has(peer.recvSeqAudio)) {
+    const entry = peer.audioJitterBuffer.get(peer.recvSeqAudio)!;
+    peer.audioJitterBuffer.delete(peer.recvSeqAudio);
+    peer.nextPlayTime = scheduleAudio(peer.audioCtx, peer.nextPlayTime, entry.pcm, entry.sampleRate);
+    peer.recvSeqAudio++;
   }
-  if (rt.audioJitterBuffer.size > 0) {
-    const minSeq = Math.min(...rt.audioJitterBuffer.keys());
-    const gap = minSeq - rt.recvSeqAudio;
+  if (peer.audioJitterBuffer.size > 0) {
+    const minSeq = Math.min(...peer.audioJitterBuffer.keys());
+    const gap = minSeq - peer.recvSeqAudio;
     if (gap > AUDIO_JITTER_FRAMES * 2) {
-      const frameSize = Math.floor(rt.cfg.audio_target_sample_rate * rt.cfg.audio_frame_ms / 1000);
+      const frameSize = Math.floor(cfg.audio_target_sample_rate * cfg.audio_frame_ms / 1000);
       const silence = new Float32Array(gap * frameSize);
-      rt.nextPlayTime = scheduleAudio(rt.audioCtx, rt.nextPlayTime, silence, rt.cfg.audio_target_sample_rate);
-      rt.recvSeqAudio = minSeq;
-      drainAudioBuffer(rt);
+      peer.nextPlayTime = scheduleAudio(peer.audioCtx, peer.nextPlayTime, silence, cfg.audio_target_sample_rate);
+      peer.recvSeqAudio = minSeq;
+      drainAudioBuffer(peer, cfg);
     }
   }
 }
 
-function drainVideoBuffer(rt: ActiveRuntime) {
-  while (rt.videoJitterBuffer.has(rt.recvSeqVideo)) {
-    const entry = rt.videoJitterBuffer.get(rt.recvSeqVideo)!;
-    rt.videoJitterBuffer.delete(rt.recvSeqVideo);
-    rt.recvSeqVideo++;
-    if (!entry.isIframe && rt.lastVideoIframeSeq === -1) continue;
-    if (entry.isIframe) rt.lastVideoIframeSeq = entry.seq;
-    displayVideoFrame(rt, entry.jpeg);
+function drainVideoBuffer(peer: PerPeerRuntime) {
+  while (peer.videoJitterBuffer.has(peer.recvSeqVideo)) {
+    const entry = peer.videoJitterBuffer.get(peer.recvSeqVideo)!;
+    peer.videoJitterBuffer.delete(peer.recvSeqVideo);
+    peer.recvSeqVideo++;
+    if (!entry.isIframe && peer.lastVideoIframeSeq === -1) continue;
+    if (entry.isIframe) peer.lastVideoIframeSeq = entry.seq;
+    displayVideoFrame(peer, entry.jpeg);
   }
-  if (rt.videoJitterBuffer.size > 0) {
-    const minSeq = Math.min(...rt.videoJitterBuffer.keys());
-    const gap = minSeq - rt.recvSeqVideo;
+  if (peer.videoJitterBuffer.size > 0) {
+    const minSeq = Math.min(...peer.videoJitterBuffer.keys());
+    const gap = minSeq - peer.recvSeqVideo;
     if (gap > VIDEO_JITTER_FRAMES) {
       let resyncSeq = minSeq;
-      for (const [seq, entry] of rt.videoJitterBuffer) {
+      for (const [seq, entry] of peer.videoJitterBuffer) {
         if (entry.isIframe && seq < resyncSeq) resyncSeq = seq;
       }
-      rt.recvSeqVideo = resyncSeq;
-      rt.lastVideoIframeSeq = -1;
-      drainVideoBuffer(rt);
+      peer.recvSeqVideo = resyncSeq;
+      peer.lastVideoIframeSeq = -1;
+      drainVideoBuffer(peer);
     }
   }
 }
 
-async function startOrRestartVideo(rt: ActiveRuntime, session: any) {
+function teardownPeer(peer: PerPeerRuntime) {
+  try { peer.audioCtx.close(); } catch {}
+  if (peer.lastVideoUrl) URL.revokeObjectURL(peer.lastVideoUrl);
+  if (peer.talkTimer) window.clearTimeout(peer.talkTimer);
+}
+
+function updateRemotePeersStore() {
+  if (!runtime) {
+    remotePeers.set(new Map());
+    return;
+  }
+  const current = get(remotePeers);
+  const next = new Map<string, PeerState>();
+  for (const [hex] of runtime.peers) {
+    const existing = current.get(hex);
+    next.set(hex, existing ?? { hex, talking: false, videoUrl: null });
+  }
+  remotePeers.set(next);
+}
+
+export function addPeer(hex: string): void {
+  if (!runtime) return;
+  if (runtime.peers.has(hex)) return;
+  const audioCtx = new AudioContext();
+  const peer: PerPeerRuntime = {
+    hex,
+    audioCtx,
+    nextPlayTime: audioCtx.currentTime + 0.1,
+    audioJitterBuffer: new Map(),
+    recvSeqAudio: -1,
+    audioBufferReady: false,
+    videoJitterBuffer: new Map(),
+    recvSeqVideo: -1,
+    lastVideoIframeSeq: -1,
+  };
+  runtime.peers.set(hex, peer);
+  updateRemotePeersStore();
+}
+
+export function removePeer(hex: string): void {
+  if (!runtime) return;
+  const peer = runtime.peers.get(hex);
+  if (!peer) return;
+  teardownPeer(peer);
+  runtime.peers.delete(hex);
+  updateRemotePeersStore();
+}
+
+export function getRuntimePeerHexes(): string[] {
+  return runtime ? Array.from(runtime.peers.keys()) : [];
+}
+
+async function startOrRestartVideo(rt: ActiveRuntime, room: any) {
   if (rt.callType !== 'Video') return;
 
   if (rt.videoTimer) window.clearInterval(rt.videoTimer);
@@ -283,9 +355,11 @@ async function startOrRestartVideo(rt: ActiveRuntime, session: any) {
   const g = canvas.getContext('2d', { willReadFrequently: true });
 
   const intervalMs = Math.floor(1000 / fps);
+  const roomId = room.room_id ?? room.roomId;
+  const roomIdStr = rt.roomIdStr;
 
   rt.videoTimer = window.setInterval(async () => {
-    if (!runtime || runtime.sessionIdStr !== rt.sessionIdStr) return;
+    if (!runtime || runtime.roomIdStr !== roomIdStr) return;
     if (!g) return;
 
     g.drawImage(videoEl, 0, 0, w, h);
@@ -295,76 +369,65 @@ async function startOrRestartVideo(rt: ActiveRuntime, session: any) {
     if (blob.size > rt.cfg.video_max_frame_bytes) return;
 
     const bytes = new Uint8Array(await blob.arrayBuffer());
-
-    const sessionId = session.session_id ?? session.sessionId;
     const seq = rt.sendSeqVideo++;
     const isIframe = (seq % rt.cfg.video_iframe_interval) === 0;
 
     safeSendReducer(rt.conn, 'send_video_frame', 'sendVideoFrame', {
-      session_id: sessionId,
-      sessionId,
-      to: rt.peerId,
-      seq,
-      width: w,
-      height: h,
-      is_iframe: isIframe,
-      isIframe,
-      jpeg: bytes
+      room_id: roomId, roomId, seq, width: w, height: h, is_iframe: isIframe, isIframe, jpeg: bytes
     });
   }, intervalMs);
 
   rt.stopFns.push(() => {
     if (rt.videoTimer) window.clearInterval(rt.videoTimer);
-    try {
-      videoEl.pause();
-    } catch {}
+    try { videoEl.pause(); } catch {}
   });
 }
 
-export async function startCallRuntime(session: any, conn: DbConnection, myId: Identity) {
+export async function startCallRuntime(
+  room: any,
+  initialPeers: any[],
+  conn: DbConnection,
+  myId: Identity
+): Promise<void> {
   const cfg = get(mediaSettingsStore);
   if (!cfg) throw new Error('Cannot start call: media_settings singleton (id=1) not loaded');
   validateCfg(cfg);
 
-  const sessionIdStr = sessionIdOf(session);
-  if (!sessionIdStr) return;
+  const roomIdStr = roomIdOf(room);
+  if (!roomIdStr) return;
 
-  if (runtime && runtime.sessionIdStr === sessionIdStr) return;
+  if (runtime && runtime.roomIdStr === roomIdStr) return;
   stopCallRuntime();
 
   const myHex = idHex(myId);
-  const callerHex = idHex(session.caller);
-  const peerId = callerHex === myHex ? session.callee : session.caller;
-  const peerHex = idHex(peerId);
+  const callType = callTypeOf(room);
+  const micAudioCtx = new AudioContext();
 
-  const callType = callTypeOf(session);
-
-  const audioCtx = new AudioContext();
   const rt: ActiveRuntime = {
     conn,
     myHex,
-    peerId,
-    peerHex,
-    sessionIdStr,
+    roomIdStr,
     callType,
-    audioCtx,
-    nextPlayTime: audioCtx.currentTime + 0.1,
     stopFns: [],
     sendSeqAudio: 0,
     sendSeqVideo: 0,
     cfg,
-    audioJitterBuffer: new Map(),
-    recvSeqAudio: -1,
-    audioBufferReady: false,
-    videoJitterBuffer: new Map(),
-    recvSeqVideo: -1,
-    lastVideoIframeSeq: -1
+    peers: new Map(),
+    micAudioCtx,
   };
   runtime = rt;
 
+  // Initialize peers from initialPeers
+  for (const p of initialPeers) {
+    const pHex = p.identity?.toHexString?.() ?? '';
+    if (pHex && pHex !== myHex) {
+      addPeer(pHex);
+    }
+  }
+
   // If settings disappear mid-call, stop immediately (no defaults)
   const unsub = mediaSettingsStore.subscribe(async (next) => {
-    if (!runtime || runtime.sessionIdStr !== sessionIdStr) return;
+    if (!runtime || runtime.roomIdStr !== roomIdStr) return;
     if (!next) {
       stopCallRuntime();
       return;
@@ -380,7 +443,7 @@ export async function startCallRuntime(session: any, conn: DbConnection, myId: I
         prev.video_fps !== next.video_fps ||
         prev.video_jpeg_quality !== next.video_jpeg_quality ||
         prev.video_max_frame_bytes !== next.video_max_frame_bytes;
-      if (changed) await startOrRestartVideo(runtime, session);
+      if (changed) await startOrRestartVideo(runtime, room);
     }
   });
   rt.stopFns.push(() => unsub());
@@ -393,22 +456,23 @@ export async function startCallRuntime(session: any, conn: DbConnection, myId: I
   rt.micStream = mic;
 
   const workletUrl = new URL('./pcm-capture-worklet.ts', import.meta.url);
-  await audioCtx.audioWorklet.addModule(workletUrl);
+  await micAudioCtx.audioWorklet.addModule(workletUrl);
 
-  const source = audioCtx.createMediaStreamSource(mic);
-  const node = new AudioWorkletNode(audioCtx, 'pcm-capture');
+  const source = micAudioCtx.createMediaStreamSource(mic);
+  const node = new AudioWorkletNode(micAudioCtx, 'pcm-capture');
   rt.workletNode = node;
   source.connect(node);
 
-  const inRate = audioCtx.sampleRate;
+  const inRate = micAudioCtx.sampleRate;
   const outRate = rt.cfg.audio_target_sample_rate;
   const frameMs = rt.cfg.audio_frame_ms;
   const blockIn = Math.max(1, Math.floor(inRate * (frameMs / 1000)));
 
   let bufferIn = new Float32Array(0);
+  const roomId = room.room_id ?? room.roomId;
 
   node.port.onmessage = (ev: MessageEvent<Float32Array>) => {
-    if (!runtime || runtime.sessionIdStr !== sessionIdStr) return;
+    if (!runtime || runtime.roomIdStr !== roomIdStr) return;
     const chunk = ev.data;
     if (!(chunk instanceof Float32Array)) return;
 
@@ -426,13 +490,11 @@ export async function startCallRuntime(session: any, conn: DbConnection, myId: I
 
       if (bytes.length > runtime.cfg.audio_max_frame_bytes) continue;
 
-      const sessionId = session.session_id ?? session.sessionId;
       const seq = runtime.sendSeqAudio++;
 
       safeSendReducer(runtime.conn, 'send_audio_frame', 'sendAudioFrame', {
-        session_id: sessionId,
-        sessionId,
-        to: runtime.peerId,
+        room_id: roomId,
+        roomId,
         seq,
         sample_rate: outRate,
         sampleRate: outRate,
@@ -448,16 +510,12 @@ export async function startCallRuntime(session: any, conn: DbConnection, myId: I
 
   rt.stopFns.push(() => {
     node.port.onmessage = null;
-    try {
-      source.disconnect();
-    } catch {}
-    try {
-      node.disconnect();
-    } catch {}
+    try { source.disconnect(); } catch {}
+    try { node.disconnect(); } catch {}
   });
 
   if (rt.callType === 'Video') {
-    await startOrRestartVideo(rt, session);
+    await startOrRestartVideo(rt, room);
   }
 }
 
@@ -465,35 +523,35 @@ export function stopCallRuntime() {
   if (!runtime) return;
 
   for (const fn of runtime.stopFns) {
-    try {
-      fn();
-    } catch {}
+    try { fn(); } catch {}
   }
 
   if (runtime.micStream) for (const t of runtime.micStream.getTracks()) t.stop();
   if (runtime.camStream) for (const t of runtime.camStream.getTracks()) t.stop();
 
-  try {
-    runtime.audioCtx.close();
-  } catch {}
+  try { runtime.micAudioCtx.close(); } catch {}
 
-  if (runtime.lastRemoteUrl) URL.revokeObjectURL(runtime.lastRemoteUrl);
+  for (const peer of runtime.peers.values()) {
+    teardownPeer(peer);
+  }
 
   runtime = null;
   localVideoStream.set(null);
-  remoteVideoUrl.set(null);
-  remoteTalking.set(false);
+  remotePeers.set(new Map());
 }
 
 export function handleAudioEvent(row: any) {
   if (!runtime) return;
 
-  const sid = row?.session_id ?? row?.sessionId;
-  const sidStr = sid?.toString?.() ?? String(sid ?? '');
+  const rid = row?.room_id ?? row?.roomId;
+  const ridStr = rid?.toString?.() ?? String(rid ?? '');
   const fromHex = row?.from?.toHexString?.() ?? '';
 
-  if (sidStr !== runtime.sessionIdStr) return;
-  if (fromHex !== runtime.peerHex) return;
+  if (ridStr !== runtime.roomIdStr) return;
+  if (fromHex === runtime.myHex) return;
+
+  const peer = runtime.peers.get(fromHex);
+  if (!peer) return;
 
   const bytes = getBytes(row, ['pcm16le', 'pcm16Le', 'pcm16_le', 'pcm_16le']);
   if (!bytes) return;
@@ -502,18 +560,18 @@ export function handleAudioEvent(row: any) {
   const sr = Number(row.sample_rate ?? row.sampleRate ?? runtime.cfg.audio_target_sample_rate);
   const seq = Number(row.seq ?? 0);
 
-  if (runtime.recvSeqAudio === -1) runtime.recvSeqAudio = seq;
-  runtime.audioJitterBuffer.set(seq, { pcm, sampleRate: sr });
-  if (!runtime.audioBufferReady && runtime.audioJitterBuffer.size >= AUDIO_JITTER_FRAMES) {
-    runtime.audioBufferReady = true;
+  if (peer.recvSeqAudio === -1) peer.recvSeqAudio = seq;
+  peer.audioJitterBuffer.set(seq, { pcm, sampleRate: sr });
+  if (!peer.audioBufferReady && peer.audioJitterBuffer.size >= AUDIO_JITTER_FRAMES) {
+    peer.audioBufferReady = true;
   }
-  drainAudioBuffer(runtime);
+  drainAudioBuffer(peer, runtime.cfg);
 
   const rms = Number(row.rms ?? 0);
   if (rms > runtime.cfg.audio_talking_rms_threshold) {
-    remoteTalking.set(true);
-    if (runtime.talkTimer) window.clearTimeout(runtime.talkTimer);
-    runtime.talkTimer = window.setTimeout(() => remoteTalking.set(false), 250);
+    setTalking(fromHex, true);
+    if (peer.talkTimer) window.clearTimeout(peer.talkTimer);
+    peer.talkTimer = window.setTimeout(() => setTalking(fromHex, false), 250);
   }
 }
 
@@ -521,12 +579,15 @@ export function handleVideoEvent(row: any) {
   if (!runtime) return;
   if (runtime.callType !== 'Video') return;
 
-  const sid = row?.session_id ?? row?.sessionId;
-  const sidStr = sid?.toString?.() ?? String(sid ?? '');
+  const rid = row?.room_id ?? row?.roomId;
+  const ridStr = rid?.toString?.() ?? String(rid ?? '');
   const fromHex = row?.from?.toHexString?.() ?? '';
 
-  if (sidStr !== runtime.sessionIdStr) return;
-  if (fromHex !== runtime.peerHex) return;
+  if (ridStr !== runtime.roomIdStr) return;
+  if (fromHex === runtime.myHex) return;
+
+  const peer = runtime.peers.get(fromHex);
+  if (!peer) return;
 
   const jpeg = getBytes(row, ['jpeg']);
   if (!jpeg) return;
@@ -534,7 +595,7 @@ export function handleVideoEvent(row: any) {
   const seq = Number(row.seq ?? 0);
   const isIframe: boolean = row.is_iframe ?? row.isIframe ?? false;
 
-  if (runtime.recvSeqVideo === -1) runtime.recvSeqVideo = seq;
-  runtime.videoJitterBuffer.set(seq, { jpeg, isIframe, seq });
-  drainVideoBuffer(runtime);
+  if (peer.recvSeqVideo === -1) peer.recvSeqVideo = seq;
+  peer.videoJitterBuffer.set(seq, { jpeg, isIframe, seq });
+  drainVideoBuffer(peer);
 }

@@ -10,21 +10,17 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 import {
-  CallType,
-  CallState,
+  ParticipantState,
 } from "./types";
 
 
 export default __t.row({
-  sessionId: __t.uuid().primaryKey().name("session_id"),
-  get callType() {
-    return CallType.name("call_type");
-  },
+  id: __t.u64().primaryKey(),
+  roomId: __t.uuid().name("room_id"),
+  identity: __t.identity(),
   get state() {
-    return CallState;
+    return ParticipantState;
   },
-  caller: __t.identity(),
-  callee: __t.identity(),
-  createdAt: __t.timestamp().name("created_at"),
-  answeredAt: __t.option(__t.timestamp()).name("answered_at"),
+  invitedBy: __t.identity().name("invited_by"),
+  joinedAt: __t.option(__t.timestamp()).name("joined_at"),
 });
