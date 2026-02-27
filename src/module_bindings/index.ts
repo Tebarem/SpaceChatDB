@@ -49,6 +49,7 @@ import SetNicknameReducer from "./set_nickname_reducer";
 import AudioFrameEventRow from "./audio_frame_event_table";
 import CallSessionRow from "./call_session_table";
 import ChatMessageRow from "./chat_message_table";
+import MediaSettingsRow from "./media_settings_table";
 import UserRow from "./user_table";
 import VideoFrameEventRow from "./video_frame_event_table";
 
@@ -86,6 +87,17 @@ const tablesSchema = __schema({
       { name: 'chat_message_id_key', constraint: 'unique', columns: ['id'] },
     ],
   }, ChatMessageRow),
+  media_settings: __table({
+    name: 'media_settings',
+    indexes: [
+      { name: 'id', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'media_settings_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, MediaSettingsRow),
   user: __table({
     name: 'user',
     indexes: [

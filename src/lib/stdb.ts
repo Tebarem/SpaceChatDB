@@ -36,9 +36,32 @@ function setActionError(err: unknown) {
   actionError.set(msg);
 }
 
-function getTable(conn: DbConnection, snake: string, camel: string) {
+function normalizeKey(s: string): string {
+  return s.toLowerCase().replace(/_/g, '');
+}
+
+function findDbTable(conn: DbConnection, candidates: string[]) {
   const db: any = (conn as any).db;
-  return db?.[snake] ?? db?.[camel] ?? null;
+  if (!db) return null;
+
+  for (const c of candidates) {
+    if (db[c]) return db[c];
+  }
+
+  const want = new Set(candidates.map(normalizeKey));
+  for (const k of Object.keys(db)) {
+    const nk = normalizeKey(k);
+    for (const w of want) {
+      if (nk === w) return db[k];
+      if (nk.startsWith(w)) return db[k];
+      if (nk.endsWith(w)) return db[k];
+    }
+  }
+  return null;
+}
+
+function getCoreTable(conn: DbConnection, snake: string, camel: string) {
+  return findDbTable(conn, [snake, camel, snake.replace(/_/g, ''), camel.toLowerCase()]);
 }
 
 function getReducerFn(conn: DbConnection, snake: string, camel: string) {
@@ -150,7 +173,7 @@ function upsertChatMessage(arr: any[], row: any): any[] {
     next[idx] = row;
   }
 
-  next.sort((a: any, b: any) => compareU64(a.id, b.id));
+  next.sort((a, b) => compareU64(a.id, b.id));
   return next.slice(-250);
 }
 
@@ -162,7 +185,7 @@ function uniqueMessages(rows: any[]): any[] {
     map.set(id, r);
   }
   const next = Array.from(map.values());
-  next.sort((a: any, b: any) => compareU64(a.id, b.id));
+  next.sort((a, b) => compareU64(a.id, b.id));
   return next.slice(-250);
 }
 
@@ -176,44 +199,145 @@ function safe<T extends (...args: any[]) => any>(name: string, fn: T): T {
   }) as T;
 }
 
-// Strict settings parsing: no fallback, reject missing/NaN.
-function mustNum(v: any, field: string): number {
-  const n = typeof v === 'bigint' ? Number(v) : Number(v);
-  if (!Number.isFinite(n)) throw new Error(`media_settings.${field} is not a number`);
-  return n;
+/**
+ * Read a column from a row using multiple possible key spellings.
+ * (snake_case vs camelCase vs a couple legacy variants)
+ */
+function readField(row: any, keys: string[]): any {
+  for (const k of keys) {
+    if (row && (k in row)) return row[k];
+  }
+  // Also try case-insensitive match
+  if (row && typeof row === 'object') {
+    const wanted = new Set(keys.map((k) => k.toLowerCase()));
+    for (const actual of Object.keys(row)) {
+      if (wanted.has(actual.toLowerCase())) return row[actual];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Strict, no-default numeric parsing that supports common SpacetimeDB TS wrappers.
+ * Accepts: number, bigint, numeric string, {value}, {inner}, {v}, {val}, toNumber(), toBigInt(), single-key unit wrapper, toString()
+ */
+function mustNumber(raw: any, field: string, rowForDebug?: any): number {
+  const fail = () => {
+    const keys = rowForDebug && typeof rowForDebug === 'object' ? Object.keys(rowForDebug).join(', ') : '';
+    const preview = (() => {
+      try {
+        return JSON.stringify(raw);
+      } catch {
+        return String(raw);
+      }
+    })();
+    throw new Error(`media_settings.${field} is not a number (raw=${preview})${keys ? `; row keys: ${keys}` : ''}`);
+  };
+
+  if (typeof raw === 'number') {
+    if (Number.isFinite(raw)) return raw;
+    return fail();
+  }
+
+  if (typeof raw === 'bigint') return Number(raw);
+
+  if (typeof raw === 'string') {
+    const n = Number(raw.trim());
+    if (Number.isFinite(n)) return n;
+    return fail();
+  }
+
+  if (raw && typeof raw === 'object') {
+    // common wrappers
+    if ('value' in raw) return mustNumber((raw as any).value, field, rowForDebug);
+    if ('inner' in raw) return mustNumber((raw as any).inner, field, rowForDebug);
+    if ('v' in raw) return mustNumber((raw as any).v, field, rowForDebug);
+    if ('val' in raw) return mustNumber((raw as any).val, field, rowForDebug);
+
+    if (typeof (raw as any).toNumber === 'function') {
+      const n = (raw as any).toNumber();
+      if (typeof n === 'number' && Number.isFinite(n)) return n;
+    }
+
+    if (typeof (raw as any).toBigInt === 'function') {
+      const b = (raw as any).toBigInt();
+      if (typeof b === 'bigint') return Number(b);
+    }
+
+    // single-key object wrapper { U32: 16000 } or { u32: 16000 }
+    const keys = Object.keys(raw);
+    if (keys.length === 1) {
+      const v = (raw as any)[keys[0]];
+      // unit variants might be {} / null; ignore those
+      if (v != null) {
+        try {
+          return mustNumber(v, field, rowForDebug);
+        } catch {
+          // fallthrough
+        }
+      }
+    }
+
+    if (typeof (raw as any).toString === 'function') {
+      const s = String((raw as any).toString()).trim();
+      const cleaned = s.endsWith('n') ? s.slice(0, -1) : s;
+      const n = Number(cleaned);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+
+  return fail();
+}
+
+function mustField(row: any, field: string, keys: string[]): number {
+  const raw = readField(row, keys);
+  if (raw === undefined) {
+    const all = row && typeof row === 'object' ? Object.keys(row).join(', ') : '';
+    throw new Error(`media_settings.${field} missing; row keys: ${all}`);
+  }
+  return mustNumber(raw, field, row);
 }
 
 function applySettingsRow(row: any) {
   if (!row) throw new Error('media_settings row is empty');
-  const id = mustNum(row.id, 'id');
+
+  const id = mustField(row, 'id', ['id', 'Id']);
   if (id !== 1) return;
 
   const s: MediaSettings = {
     id: 1,
 
-    audio_target_sample_rate: mustNum(row.audio_target_sample_rate, 'audio_target_sample_rate'),
-    audio_frame_ms: mustNum(row.audio_frame_ms, 'audio_frame_ms'),
-    audio_max_frame_bytes: mustNum(row.audio_max_frame_bytes, 'audio_max_frame_bytes'),
-    audio_talking_rms_threshold: mustNum(row.audio_talking_rms_threshold, 'audio_talking_rms_threshold'),
+    audio_target_sample_rate: mustField(row, 'audio_target_sample_rate', [
+      'audio_target_sample_rate',
+      'audioTargetSampleRate',
+      'audioTargetSampleRateHz'
+    ]),
+    audio_frame_ms: mustField(row, 'audio_frame_ms', ['audio_frame_ms', 'audioFrameMs']),
+    audio_max_frame_bytes: mustField(row, 'audio_max_frame_bytes', ['audio_max_frame_bytes', 'audioMaxFrameBytes']),
+    audio_talking_rms_threshold: mustField(row, 'audio_talking_rms_threshold', [
+      'audio_talking_rms_threshold',
+      'audioTalkingRmsThreshold'
+    ]),
 
-    video_width: mustNum(row.video_width, 'video_width'),
-    video_height: mustNum(row.video_height, 'video_height'),
-    video_fps: mustNum(row.video_fps, 'video_fps'),
-    video_jpeg_quality: mustNum(row.video_jpeg_quality, 'video_jpeg_quality'),
-    video_max_frame_bytes: mustNum(row.video_max_frame_bytes, 'video_max_frame_bytes')
+    video_width: mustField(row, 'video_width', ['video_width', 'videoWidth']),
+    video_height: mustField(row, 'video_height', ['video_height', 'videoHeight']),
+    video_fps: mustField(row, 'video_fps', ['video_fps', 'videoFps']),
+    video_jpeg_quality: mustField(row, 'video_jpeg_quality', ['video_jpeg_quality', 'videoJpegQuality']),
+    video_max_frame_bytes: mustField(row, 'video_max_frame_bytes', ['video_max_frame_bytes', 'videoMaxFrameBytes'])
   };
 
   mediaSettingsStore.set(s);
 }
 
 function attachRowCallbacks(conn: DbConnection) {
-  const userT = getTable(conn, 'user', 'user');
-  const chatT = getTable(conn, 'chat_message', 'chatMessage');
-  const callT = getTable(conn, 'call_session', 'callSession');
+  const userT = getCoreTable(conn, 'user', 'user');
+  const chatT = getCoreTable(conn, 'chat_message', 'chatMessage');
+  const callT = getCoreTable(conn, 'call_session', 'callSession');
 
   if (!userT || !chatT || !callT) {
+    const keys = Object.keys(((conn as any).db ?? {})).join(', ');
     connectionError.set(
-      `Missing core table handles. user=${!!userT}, chat_message=${!!chatT}, call_session=${!!callT}. Regenerate bindings?`
+      `Missing core table handles. user=${!!userT}, chat_message=${!!chatT}, call_session=${!!callT}. db keys: ${keys}`
     );
     return;
   }
@@ -237,48 +361,52 @@ function attachRowCallbacks(conn: DbConnection) {
     })
   );
 
-  const audioEvtT = getTable(conn, 'audio_frame_event', 'audioFrameEvent');
-  const videoEvtT = getTable(conn, 'video_frame_event', 'videoFrameEvent');
+  const audioEvtT = getCoreTable(conn, 'audio_frame_event', 'audioFrameEvent');
+  const videoEvtT = getCoreTable(conn, 'video_frame_event', 'videoFrameEvent');
   if (audioEvtT) audioEvtT.onInsert(safe('audio_frame_event.onInsert', (_e: any, row: any) => handleAudioEvent(row)));
   if (videoEvtT) videoEvtT.onInsert(safe('video_frame_event.onInsert', (_e: any, row: any) => handleVideoEvent(row)));
 
-  // media_settings is REQUIRED (no defaults). If missing, set error + keep store null.
-  const settingsT = getTable(conn, 'media_settings', 'mediaSettings');
-  if (settingsT) {
-    settingsT.onInsert(
-      safe('media_settings.onInsert', (_e: any, row: any) => {
-        try {
-          applySettingsRow(row);
-          connectionError.set(null);
-        } catch (err) {
-          connectionError.set(String(err));
-          mediaSettingsStore.set(null);
-        }
-      })
-    );
-    settingsT.onUpdate(
-      safe('media_settings.onUpdate', (_e: any, _old: any, row: any) => {
-        try {
-          applySettingsRow(row);
-          connectionError.set(null);
-        } catch (err) {
-          connectionError.set(String(err));
-          mediaSettingsStore.set(null);
-        }
-      })
-    );
-    settingsT.onDelete(
-      safe('media_settings.onDelete', (_e: any, row: any) => {
-        if (Number(row.id) === 1) {
-          mediaSettingsStore.set(null);
-          connectionError.set('media_settings singleton (id=1) was deleted');
-        }
-      })
-    );
-  } else {
+  // REQUIRED: media_settings (no defaults)
+  const settingsT = findDbTable(conn, ['media_settings', 'mediaSettings', 'MediaSettings']);
+  if (!settingsT) {
+    const keys = Object.keys(((conn as any).db ?? {})).join(', ');
     mediaSettingsStore.set(null);
-    connectionError.set('media_settings table is missing in bindings/module (no defaults enabled)');
+    connectionError.set(`media_settings table handle not found in bindings. db keys: ${keys}`);
+    return;
   }
+
+  settingsT.onInsert(
+    safe('media_settings.onInsert', (_e: any, row: any) => {
+      try {
+        applySettingsRow(row);
+        connectionError.set(null);
+      } catch (err) {
+        mediaSettingsStore.set(null);
+        connectionError.set(String(err));
+      }
+    })
+  );
+  settingsT.onUpdate(
+    safe('media_settings.onUpdate', (_e: any, _old: any, row: any) => {
+      try {
+        applySettingsRow(row);
+        connectionError.set(null);
+      } catch (err) {
+        mediaSettingsStore.set(null);
+        connectionError.set(String(err));
+      }
+    })
+  );
+  settingsT.onDelete(
+    safe('media_settings.onDelete', (_e: any, row: any) => {
+      const rid = readField(row, ['id', 'Id']);
+      const n = typeof rid === 'bigint' ? Number(rid) : Number(rid);
+      if (n === 1) {
+        mediaSettingsStore.set(null);
+        connectionError.set('media_settings singleton (id=1) was deleted');
+      }
+    })
+  );
 }
 
 export function connectStdb() {
@@ -316,38 +444,47 @@ export function connectStdb() {
         conn
           .subscriptionBuilder()
           .onApplied(() => {
-            const userT = getTable(conn, 'user', 'user');
-            const chatT = getTable(conn, 'chat_message', 'chatMessage');
-            const callT = getTable(conn, 'call_session', 'callSession');
-            const settingsT = getTable(conn, 'media_settings', 'mediaSettings');
+            const userT = getCoreTable(conn, 'user', 'user');
+            const chatT = getCoreTable(conn, 'chat_message', 'chatMessage');
+            const callT = getCoreTable(conn, 'call_session', 'callSession');
+            const settingsT = findDbTable(conn, ['media_settings', 'mediaSettings', 'MediaSettings']);
 
             usersStore.set(userT ? Array.from(userT.iter()) : []);
             messagesStore.set(chatT ? uniqueMessages(Array.from(chatT.iter()) as any[]) : []);
             callSessionsStore.set(callT ? Array.from(callT.iter()) : []);
 
-            // No defaults: if missing, leave null and set error
-            if (settingsT) {
-              const rows = Array.from(settingsT.iter()) as any[];
-              const row = rows.find((r) => Number(r.id) === 1) ?? null;
-              if (!row) {
-                mediaSettingsStore.set(null);
-                connectionError.set('media_settings singleton (id=1) not found. Insert it via SQL.');
-              } else {
-                try {
-                  applySettingsRow(row);
-                  connectionError.set(null);
-                } catch (err) {
-                  mediaSettingsStore.set(null);
-                  connectionError.set(String(err));
-                }
-              }
-            } else {
+            if (!settingsT) {
               mediaSettingsStore.set(null);
-              connectionError.set('media_settings table is missing in bindings/module (no defaults enabled)');
+              const keys = Object.keys(((conn as any).db ?? {})).join(', ');
+              connectionError.set(`media_settings table handle not found in bindings. db keys: ${keys}`);
+              return;
+            }
+
+            const rows = Array.from(settingsT.iter()) as any[];
+            const row = rows.find((r) => {
+              try {
+                return mustField(r, 'id', ['id', 'Id']) === 1;
+              } catch {
+                return false;
+              }
+            });
+
+            if (!row) {
+              mediaSettingsStore.set(null);
+              connectionError.set('media_settings singleton (id=1) not found. Insert it via SQL.');
+              return;
+            }
+
+            try {
+              applySettingsRow(row);
+              connectionError.set(null);
+            } catch (err) {
+              mediaSettingsStore.set(null);
+              connectionError.set(String(err));
             }
           })
-          .onError((_c: any) => {
-            connectionError.set(`Subscription error: ${String(_c.event.message)}`);
+          .onError((_ctx: any) => {
+            connectionError.set(`Subscription error: ${String(_ctx.event.message)}`);
           })
           .subscribeToAllTables();
       } catch (e) {
@@ -377,7 +514,7 @@ export function connectStdb() {
     .build();
 }
 
-// Reducers you already have
+// Reducers you already use elsewhere (leave as-is)
 export function sendChat(text: string) {
   const conn = get(connStore);
   if (!conn) return Promise.resolve();
@@ -390,29 +527,39 @@ export function setNickname(nickname: string) {
   return Promise.resolve(callReducerArgs(conn, 'set_nickname', 'setNickname', { nickname }));
 }
 
-// Keep your existing robust CallType encoding here (unchanged)
-function callTypeEncodings(callType: 'Voice' | 'Video') {
-  const lower = callType.toLowerCase();
-  const title = callType;
-  return [{ tag: title }, { tag: lower }, { [title]: null }, { [lower]: null }, { [title]: {} }, { [lower]: {} }];
-}
-
 function looksLikeSumTypeError(e: any): boolean {
   const msg = String(e?.message ?? e);
   return msg.includes('serialize sum type') || msg.includes('unknown tag') || msg.includes('sum type');
+}
+
+function callTypeEncodings(callType: 'Voice' | 'Video') {
+  const lower = callType.toLowerCase();
+  const title = callType;
+  return [
+    { tag: title },
+    { tag: lower },
+    { tag: title, value: null },
+    { tag: lower, value: null },
+    { [title]: null },
+    { [lower]: null },
+    { [title]: {} },
+    { [lower]: {} },
+    { [title]: [] },
+    { [lower]: [] }
+  ];
 }
 
 export async function requestCall(target: Identity, callType: 'Voice' | 'Video') {
   const conn = get(connStore);
   if (!conn) return;
 
-  // block initiating calls if settings aren't loaded (no defaults)
   if (!get(mediaSettingsStore)) {
     actionError.set('Cannot place call: media_settings singleton (id=1) not loaded');
     return;
   }
 
   let lastErr: any = null;
+
   for (const ct of callTypeEncodings(callType)) {
     const args: any = { target, call_type: ct, callType: ct };
     try {
@@ -424,7 +571,8 @@ export async function requestCall(target: Identity, callType: 'Voice' | 'Video')
       if (!looksLikeSumTypeError(e)) throw e;
     }
   }
-  actionError.set(String(lastErr?.message ?? lastErr));
+
+  actionError.set(`request_call failed. Last: ${String(lastErr?.message ?? lastErr)}`);
 }
 
 function shouldSwallow(e: any): boolean {

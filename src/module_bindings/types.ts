@@ -59,6 +59,20 @@ export const ChatMessage = __t.object("ChatMessage", {
 });
 export type ChatMessage = __Infer<typeof ChatMessage>;
 
+export const MediaSettings = __t.object("MediaSettings", {
+  id: __t.u32(),
+  audioTargetSampleRate: __t.u32(),
+  audioFrameMs: __t.u16(),
+  audioMaxFrameBytes: __t.u32(),
+  audioTalkingRmsThreshold: __t.f32(),
+  videoWidth: __t.u16(),
+  videoHeight: __t.u16(),
+  videoFps: __t.u8(),
+  videoJpegQuality: __t.f32(),
+  videoMaxFrameBytes: __t.u32(),
+});
+export type MediaSettings = __Infer<typeof MediaSettings>;
+
 export const User = __t.object("User", {
   identity: __t.identity(),
   nickname: __t.string(),
