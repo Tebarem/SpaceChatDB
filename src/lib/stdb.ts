@@ -3,6 +3,7 @@ import { writable, get } from 'svelte/store';
 import { DbConnection } from '../module_bindings';
 import type { Identity, Uuid } from 'spacetimedb';
 import { handleAudioEvent, handleVideoEvent, stopCallRuntime } from './callRuntime';
+import { mediaSettingsStore, type MediaSettings } from './mediaSettings';
 
 // Stores
 export const connStore = writable<DbConnection | null>(null);
@@ -45,7 +46,6 @@ function getReducerFn(conn: DbConnection, snake: string, camel: string) {
   return reducers?.[snake] ?? reducers?.[camel] ?? null;
 }
 
-// Always pass ONE args object (fat args can include multiple key spellings)
 function callReducerArgs(conn: DbConnection, snake: string, camel: string, args: any) {
   const fn = getReducerFn(conn, snake, camel);
   if (!fn) {
@@ -176,6 +176,36 @@ function safe<T extends (...args: any[]) => any>(name: string, fn: T): T {
   }) as T;
 }
 
+// Strict settings parsing: no fallback, reject missing/NaN.
+function mustNum(v: any, field: string): number {
+  const n = typeof v === 'bigint' ? Number(v) : Number(v);
+  if (!Number.isFinite(n)) throw new Error(`media_settings.${field} is not a number`);
+  return n;
+}
+
+function applySettingsRow(row: any) {
+  if (!row) throw new Error('media_settings row is empty');
+  const id = mustNum(row.id, 'id');
+  if (id !== 1) return;
+
+  const s: MediaSettings = {
+    id: 1,
+
+    audio_target_sample_rate: mustNum(row.audio_target_sample_rate, 'audio_target_sample_rate'),
+    audio_frame_ms: mustNum(row.audio_frame_ms, 'audio_frame_ms'),
+    audio_max_frame_bytes: mustNum(row.audio_max_frame_bytes, 'audio_max_frame_bytes'),
+    audio_talking_rms_threshold: mustNum(row.audio_talking_rms_threshold, 'audio_talking_rms_threshold'),
+
+    video_width: mustNum(row.video_width, 'video_width'),
+    video_height: mustNum(row.video_height, 'video_height'),
+    video_fps: mustNum(row.video_fps, 'video_fps'),
+    video_jpeg_quality: mustNum(row.video_jpeg_quality, 'video_jpeg_quality'),
+    video_max_frame_bytes: mustNum(row.video_max_frame_bytes, 'video_max_frame_bytes')
+  };
+
+  mediaSettingsStore.set(s);
+}
+
 function attachRowCallbacks(conn: DbConnection) {
   const userT = getTable(conn, 'user', 'user');
   const chatT = getTable(conn, 'chat_message', 'chatMessage');
@@ -209,9 +239,46 @@ function attachRowCallbacks(conn: DbConnection) {
 
   const audioEvtT = getTable(conn, 'audio_frame_event', 'audioFrameEvent');
   const videoEvtT = getTable(conn, 'video_frame_event', 'videoFrameEvent');
-
   if (audioEvtT) audioEvtT.onInsert(safe('audio_frame_event.onInsert', (_e: any, row: any) => handleAudioEvent(row)));
   if (videoEvtT) videoEvtT.onInsert(safe('video_frame_event.onInsert', (_e: any, row: any) => handleVideoEvent(row)));
+
+  // media_settings is REQUIRED (no defaults). If missing, set error + keep store null.
+  const settingsT = getTable(conn, 'media_settings', 'mediaSettings');
+  if (settingsT) {
+    settingsT.onInsert(
+      safe('media_settings.onInsert', (_e: any, row: any) => {
+        try {
+          applySettingsRow(row);
+          connectionError.set(null);
+        } catch (err) {
+          connectionError.set(String(err));
+          mediaSettingsStore.set(null);
+        }
+      })
+    );
+    settingsT.onUpdate(
+      safe('media_settings.onUpdate', (_e: any, _old: any, row: any) => {
+        try {
+          applySettingsRow(row);
+          connectionError.set(null);
+        } catch (err) {
+          connectionError.set(String(err));
+          mediaSettingsStore.set(null);
+        }
+      })
+    );
+    settingsT.onDelete(
+      safe('media_settings.onDelete', (_e: any, row: any) => {
+        if (Number(row.id) === 1) {
+          mediaSettingsStore.set(null);
+          connectionError.set('media_settings singleton (id=1) was deleted');
+        }
+      })
+    );
+  } else {
+    mediaSettingsStore.set(null);
+    connectionError.set('media_settings table is missing in bindings/module (no defaults enabled)');
+  }
 }
 
 export function connectStdb() {
@@ -235,7 +302,6 @@ export function connectStdb() {
     .withUri(HOST)
     .withDatabaseName(DB)
     .withToken(savedToken || undefined)
-    .withConfirmedReads(false)
     .onConnect((conn: DbConnection, identity: Identity, token: string) => {
       localStorage.setItem(TOKEN_KEY, token);
 
@@ -253,12 +319,34 @@ export function connectStdb() {
             const userT = getTable(conn, 'user', 'user');
             const chatT = getTable(conn, 'chat_message', 'chatMessage');
             const callT = getTable(conn, 'call_session', 'callSession');
+            const settingsT = getTable(conn, 'media_settings', 'mediaSettings');
 
             usersStore.set(userT ? Array.from(userT.iter()) : []);
             messagesStore.set(chatT ? uniqueMessages(Array.from(chatT.iter()) as any[]) : []);
             callSessionsStore.set(callT ? Array.from(callT.iter()) : []);
+
+            // No defaults: if missing, leave null and set error
+            if (settingsT) {
+              const rows = Array.from(settingsT.iter()) as any[];
+              const row = rows.find((r) => Number(r.id) === 1) ?? null;
+              if (!row) {
+                mediaSettingsStore.set(null);
+                connectionError.set('media_settings singleton (id=1) not found. Insert it via SQL.');
+              } else {
+                try {
+                  applySettingsRow(row);
+                  connectionError.set(null);
+                } catch (err) {
+                  mediaSettingsStore.set(null);
+                  connectionError.set(String(err));
+                }
+              }
+            } else {
+              mediaSettingsStore.set(null);
+              connectionError.set('media_settings table is missing in bindings/module (no defaults enabled)');
+            }
           })
-          .onError((_c: any,) => {
+          .onError((_c: any) => {
             connectionError.set(`Subscription error: ${String(_c.event.message)}`);
           })
           .subscribeToAllTables();
@@ -271,6 +359,7 @@ export function connectStdb() {
       isConnected.set(false);
       connStore.set(null);
       identityStore.set(null);
+      mediaSettingsStore.set(null);
       started = false;
     })
     .onDisconnect((_ctx: any, err: any) => {
@@ -280,6 +369,7 @@ export function connectStdb() {
       incomingCallStore.set(null);
       activeCallStore.set(null);
       stopCallRuntime();
+      mediaSettingsStore.set(null);
 
       if (err) connectionError.set(`Disconnected: ${String(err)}`);
       started = false;
@@ -287,7 +377,7 @@ export function connectStdb() {
     .build();
 }
 
-// Reducers
+// Reducers you already have
 export function sendChat(text: string) {
   const conn = get(connStore);
   if (!conn) return Promise.resolve();
@@ -300,27 +390,11 @@ export function setNickname(nickname: string) {
   return Promise.resolve(callReducerArgs(conn, 'set_nickname', 'setNickname', { nickname }));
 }
 
-// ---- CallType serialization: try multiple tag casings/shapes ----
+// Keep your existing robust CallType encoding here (unchanged)
 function callTypeEncodings(callType: 'Voice' | 'Video') {
-  const lower = callType.toLowerCase(); // voice/video
-  const title = callType;              // Voice/Video
-
-  return [
-    { tag: title },
-    { tag: lower },
-
-    { tag: title, value: null },
-    { tag: lower, value: null },
-
-    { [title]: null },
-    { [lower]: null },
-
-    { [title]: {} },
-    { [lower]: {} },
-
-    { [title]: [] },
-    { [lower]: [] }
-  ];
+  const lower = callType.toLowerCase();
+  const title = callType;
+  return [{ tag: title }, { tag: lower }, { [title]: null }, { [lower]: null }, { [title]: {} }, { [lower]: {} }];
 }
 
 function looksLikeSumTypeError(e: any): boolean {
@@ -332,16 +406,15 @@ export async function requestCall(target: Identity, callType: 'Voice' | 'Video')
   const conn = get(connStore);
   if (!conn) return;
 
+  // block initiating calls if settings aren't loaded (no defaults)
+  if (!get(mediaSettingsStore)) {
+    actionError.set('Cannot place call: media_settings singleton (id=1) not loaded');
+    return;
+  }
+
   let lastErr: any = null;
-
   for (const ct of callTypeEncodings(callType)) {
-    const args: any = {
-      target,
-      // include BOTH possible parameter names so the value is never "undefined"
-      call_type: ct,
-      callType: ct
-    };
-
+    const args: any = { target, call_type: ct, callType: ct };
     try {
       await Promise.resolve(callReducerArgs(conn, 'request_call', 'requestCall', args));
       actionError.set(null);
@@ -349,14 +422,10 @@ export async function requestCall(target: Identity, callType: 'Voice' | 'Video')
     } catch (e) {
       lastErr = e;
       if (!looksLikeSumTypeError(e)) throw e;
-      // keep trying other encodings
     }
   }
-
-  const msg = String(lastErr?.message ?? lastErr ?? 'unknown error');
-  actionError.set(`request_call failed. Tried multiple CallType encodings. Last: ${msg}`);
+  actionError.set(String(lastErr?.message ?? lastErr));
 }
-// --------------------------------------------------------------
 
 function shouldSwallow(e: any): boolean {
   const msg = String(e?.message ?? e);

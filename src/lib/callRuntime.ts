@@ -19,31 +19,36 @@ type ActiveRuntime = {
   stopFns: (() => void)[];
   sendSeqAudio: number;
   sendSeqVideo: number;
-
   micStream?: MediaStream;
   camStream?: MediaStream;
-
   workletNode?: AudioWorkletNode;
   videoTimer?: number;
   talkTimer?: number;
   lastRemoteUrl?: string;
-
-  // live config
   cfg: MediaSettings;
-  audioInRate: number;
-  audioBlockIn: number;
-  audioOutRate: number;
-  audioMaxBytes: number;
-  talkThreshold: number;
-
-  videoWidth: number;
-  videoHeight: number;
-  videoFps: number;
-  videoQuality: number;
-  videoMaxBytes: number;
 };
 
 let runtime: ActiveRuntime | null = null;
+
+function mustFinite(n: number, name: string) {
+  if (!Number.isFinite(n)) throw new Error(`Invalid ${name}`);
+  return n;
+}
+
+function validateCfg(cfg: MediaSettings): MediaSettings {
+  mustFinite(cfg.audio_target_sample_rate, 'audio_target_sample_rate');
+  mustFinite(cfg.audio_frame_ms, 'audio_frame_ms');
+  mustFinite(cfg.audio_max_frame_bytes, 'audio_max_frame_bytes');
+  mustFinite(cfg.audio_talking_rms_threshold, 'audio_talking_rms_threshold');
+
+  mustFinite(cfg.video_width, 'video_width');
+  mustFinite(cfg.video_height, 'video_height');
+  mustFinite(cfg.video_fps, 'video_fps');
+  mustFinite(cfg.video_jpeg_quality, 'video_jpeg_quality');
+  mustFinite(cfg.video_max_frame_bytes, 'video_max_frame_bytes');
+
+  return cfg;
+}
 
 function idHex(id: Identity) {
   return id.toHexString();
@@ -57,7 +62,11 @@ function sessionIdOf(sess: any): string {
 function tagLower(v: any): string {
   if (!v) return '';
   if (typeof v === 'string') return v.toLowerCase();
-  if (typeof v === 'object' && typeof v.tag === 'string') return v.tag.toLowerCase();
+  if (typeof v === 'object') {
+    if (typeof v.tag === 'string') return v.tag.toLowerCase();
+    const keys = Object.keys(v);
+    if (keys.length === 1) return keys[0].toLowerCase();
+  }
   return String(v).toLowerCase();
 }
 
@@ -142,14 +151,11 @@ function pcm16leBytesToFloat(bytes: Uint8Array): Float32Array {
   return out;
 }
 
-// Linear resampler: inputRate -> outputRate
 function resampleLinear(input: Float32Array, inputRate: number, outputRate: number): Float32Array {
   if (inputRate === outputRate) return input;
-
   const ratio = outputRate / inputRate;
   const outLen = Math.max(1, Math.floor(input.length * ratio));
   const out = new Float32Array(outLen);
-
   for (let i = 0; i < outLen; i++) {
     const src = i / ratio;
     const i0 = Math.floor(src);
@@ -157,7 +163,6 @@ function resampleLinear(input: Float32Array, inputRate: number, outputRate: numb
     const frac = src - i0;
     out[i] = input[i0] * (1 - frac) + input[i1] * frac;
   }
-
   return out;
 }
 
@@ -173,26 +178,6 @@ function scheduleAudio(audioCtx: AudioContext, nextPlayTime: number, pcm: Float3
   return startAt + pcm.length / sampleRate;
 }
 
-function clamp(n: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, n));
-}
-
-function applyCfgToRuntime(rt: ActiveRuntime, cfg: MediaSettings) {
-  rt.cfg = cfg;
-
-  rt.audioOutRate = clamp(Number(cfg.audio_target_sample_rate) || 16000, 8000, 48000);
-  const frameMs = clamp(Number(cfg.audio_frame_ms) || 50, 10, 200);
-  rt.audioBlockIn = Math.max(120, Math.floor(rt.audioInRate * (frameMs / 1000)));
-  rt.audioMaxBytes = clamp(Number(cfg.audio_max_frame_bytes) || 64000, 2000, 200000);
-  rt.talkThreshold = Math.max(0, Number(cfg.audio_talking_rms_threshold) || 0.02);
-
-  rt.videoWidth = clamp(Number(cfg.video_width) || 320, 80, 1920);
-  rt.videoHeight = clamp(Number(cfg.video_height) || 180, 80, 1080);
-  rt.videoFps = clamp(Number(cfg.video_fps) || 5, 1, 30);
-  rt.videoQuality = clamp(Number(cfg.video_jpeg_quality) || 0.55, 0.05, 0.95);
-  rt.videoMaxBytes = clamp(Number(cfg.video_max_frame_bytes) || 512000, 20000, 5000000);
-}
-
 async function startOrRestartVideo(rt: ActiveRuntime, session: any) {
   if (rt.callType !== 'Video') return;
 
@@ -205,8 +190,13 @@ async function startOrRestartVideo(rt: ActiveRuntime, session: any) {
   }
   localVideoStream.set(null);
 
+  const w = rt.cfg.video_width;
+  const h = rt.cfg.video_height;
+  const fps = rt.cfg.video_fps;
+  const q = rt.cfg.video_jpeg_quality;
+
   const cam = await navigator.mediaDevices.getUserMedia({
-    video: { width: rt.videoWidth, height: rt.videoHeight, frameRate: rt.videoFps },
+    video: { width: w, height: h, frameRate: fps },
     audio: false
   });
   rt.camStream = cam;
@@ -220,42 +210,36 @@ async function startOrRestartVideo(rt: ActiveRuntime, session: any) {
   void videoEl.play();
 
   const canvas = document.createElement('canvas');
-  canvas.width = rt.videoWidth;
-  canvas.height = rt.videoHeight;
+  canvas.width = w;
+  canvas.height = h;
   const g = canvas.getContext('2d', { willReadFrequently: true });
 
-  const intervalMs = Math.floor(1000 / rt.videoFps);
+  const intervalMs = Math.floor(1000 / fps);
 
   rt.videoTimer = window.setInterval(async () => {
     if (!runtime || runtime.sessionIdStr !== rt.sessionIdStr) return;
     if (!g) return;
 
-    g.drawImage(videoEl, 0, 0, rt.videoWidth, rt.videoHeight);
+    g.drawImage(videoEl, 0, 0, w, h);
 
-    const blob: Blob | null = await new Promise((resolve) =>
-      canvas.toBlob((b) => resolve(b), 'image/jpeg', rt.videoQuality)
-    );
+    const blob: Blob | null = await new Promise((resolve) => canvas.toBlob((b) => resolve(b), 'image/jpeg', q));
     if (!blob) return;
+    if (blob.size > rt.cfg.video_max_frame_bytes) return;
 
-    if (blob.size > rt.videoMaxBytes) return;
-
-    const ab = await blob.arrayBuffer();
-    const bytes = new Uint8Array(ab);
+    const bytes = new Uint8Array(await blob.arrayBuffer());
 
     const sessionId = session.session_id ?? session.sessionId;
     const seq = rt.sendSeqVideo++;
 
-    const args: any = {
+    safeSendReducer(rt.conn, 'send_video_frame', 'sendVideoFrame', {
       session_id: sessionId,
       sessionId,
       to: rt.peerId,
       seq,
-      width: rt.videoWidth,
-      height: rt.videoHeight,
+      width: w,
+      height: h,
       jpeg: bytes
-    };
-
-    safeSendReducer(rt.conn, 'send_video_frame', 'sendVideoFrame', args);
+    });
   }, intervalMs);
 
   rt.stopFns.push(() => {
@@ -267,6 +251,10 @@ async function startOrRestartVideo(rt: ActiveRuntime, session: any) {
 }
 
 export async function startCallRuntime(session: any, conn: DbConnection, myId: Identity) {
+  const cfg = get(mediaSettingsStore);
+  if (!cfg) throw new Error('Cannot start call: media_settings singleton (id=1) not loaded');
+  validateCfg(cfg);
+
   const sessionIdStr = sessionIdOf(session);
   if (!sessionIdStr) return;
 
@@ -293,52 +281,34 @@ export async function startCallRuntime(session: any, conn: DbConnection, myId: I
     stopFns: [],
     sendSeqAudio: 0,
     sendSeqVideo: 0,
-
-    cfg: get(mediaSettingsStore),
-    audioInRate: audioCtx.sampleRate,
-    audioBlockIn: 2400,
-    audioOutRate: 16000,
-    audioMaxBytes: 64000,
-    talkThreshold: 0.02,
-
-    videoWidth: 320,
-    videoHeight: 180,
-    videoFps: 5,
-    videoQuality: 0.55,
-    videoMaxBytes: 512000
+    cfg
   };
-
-  applyCfgToRuntime(rt, rt.cfg);
   runtime = rt;
 
-  // React to settings changes live
-  const unsub = mediaSettingsStore.subscribe(async (cfg) => {
+  // If settings disappear mid-call, stop immediately (no defaults)
+  const unsub = mediaSettingsStore.subscribe(async (next) => {
     if (!runtime || runtime.sessionIdStr !== sessionIdStr) return;
-
+    if (!next) {
+      stopCallRuntime();
+      return;
+    }
+    validateCfg(next);
     const prev = runtime.cfg;
-    applyCfgToRuntime(runtime, cfg);
+    runtime.cfg = next;
 
-    // Restart video capture if video config changed
     if (runtime.callType === 'Video') {
       const changed =
-        prev.video_width !== cfg.video_width ||
-        prev.video_height !== cfg.video_height ||
-        prev.video_fps !== cfg.video_fps ||
-        prev.video_jpeg_quality !== cfg.video_jpeg_quality ||
-        prev.video_max_frame_bytes !== cfg.video_max_frame_bytes;
-
-      if (changed) {
-        try {
-          await startOrRestartVideo(runtime, session);
-        } catch (e) {
-          console.error('[callRuntime] restart video failed', e);
-        }
-      }
+        prev.video_width !== next.video_width ||
+        prev.video_height !== next.video_height ||
+        prev.video_fps !== next.video_fps ||
+        prev.video_jpeg_quality !== next.video_jpeg_quality ||
+        prev.video_max_frame_bytes !== next.video_max_frame_bytes;
+      if (changed) await startOrRestartVideo(runtime, session);
     }
   });
   rt.stopFns.push(() => unsub());
 
-  // Mic capture
+  // Mic
   const mic = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     video: false
@@ -353,11 +323,15 @@ export async function startCallRuntime(session: any, conn: DbConnection, myId: I
   rt.workletNode = node;
   source.connect(node);
 
+  const inRate = audioCtx.sampleRate;
+  const outRate = rt.cfg.audio_target_sample_rate;
+  const frameMs = rt.cfg.audio_frame_ms;
+  const blockIn = Math.max(1, Math.floor(inRate * (frameMs / 1000)));
+
   let bufferIn = new Float32Array(0);
 
   node.port.onmessage = (ev: MessageEvent<Float32Array>) => {
     if (!runtime || runtime.sessionIdStr !== sessionIdStr) return;
-
     const chunk = ev.data;
     if (!(chunk instanceof Float32Array)) return;
 
@@ -366,34 +340,32 @@ export async function startCallRuntime(session: any, conn: DbConnection, myId: I
     merged.set(chunk, bufferIn.length);
     bufferIn = merged;
 
-    while (bufferIn.length >= runtime.audioBlockIn) {
-      const head = bufferIn.slice(0, runtime.audioBlockIn);
-      bufferIn = bufferIn.slice(runtime.audioBlockIn);
+    while (bufferIn.length >= blockIn) {
+      const head = bufferIn.slice(0, blockIn);
+      bufferIn = bufferIn.slice(blockIn);
 
-      const resampled = resampleLinear(head, runtime.audioInRate, runtime.audioOutRate);
+      const resampled = resampleLinear(head, inRate, outRate);
       const { bytes, rms } = floatToPcm16leBytes(resampled);
 
-      if (bytes.length > runtime.audioMaxBytes) continue;
+      if (bytes.length > runtime.cfg.audio_max_frame_bytes) continue;
 
       const sessionId = session.session_id ?? session.sessionId;
       const seq = runtime.sendSeqAudio++;
 
-      const args: any = {
+      safeSendReducer(runtime.conn, 'send_audio_frame', 'sendAudioFrame', {
         session_id: sessionId,
         sessionId,
         to: runtime.peerId,
         seq,
-        sample_rate: runtime.audioOutRate,
-        sampleRate: runtime.audioOutRate,
+        sample_rate: outRate,
+        sampleRate: outRate,
         channels: 1,
         rms,
         pcm16le: bytes,
         pcm16Le: bytes,
         pcm16_le: bytes,
         pcm_16le: bytes
-      };
-
-      safeSendReducer(runtime.conn, 'send_audio_frame', 'sendAudioFrame', args);
+      });
     }
   };
 
@@ -407,7 +379,6 @@ export async function startCallRuntime(session: any, conn: DbConnection, myId: I
     } catch {}
   });
 
-  // Start video if needed
   if (rt.callType === 'Video') {
     await startOrRestartVideo(rt, session);
   }
@@ -451,12 +422,12 @@ export function handleAudioEvent(row: any) {
   if (!bytes) return;
 
   const pcm = pcm16leBytesToFloat(bytes);
-  const sr = Number(row.sample_rate ?? row.sampleRate ?? runtime.audioOutRate);
+  const sr = Number(row.sample_rate ?? row.sampleRate ?? runtime.cfg.audio_target_sample_rate);
 
   runtime.nextPlayTime = scheduleAudio(runtime.audioCtx, runtime.nextPlayTime, pcm, sr);
 
   const rms = Number(row.rms ?? 0);
-  if (rms > runtime.talkThreshold) {
+  if (rms > runtime.cfg.audio_talking_rms_threshold) {
     remoteTalking.set(true);
     if (runtime.talkTimer) window.clearTimeout(runtime.talkTimer);
     runtime.talkTimer = window.setTimeout(() => remoteTalking.set(false), 250);
