@@ -118,19 +118,42 @@ pub fn init(ctx: &ReducerContext) {
         ctx.db.media_settings().insert(MediaSettings {
             id: 1,
 
-            audio_target_sample_rate: 24000,
+            audio_target_sample_rate: 48000,
             audio_frame_ms: 20,
-            audio_max_frame_bytes: 64000,
+            audio_max_frame_bytes: 10000,
             audio_talking_rms_threshold: 0.02,
 
-            video_width: 320,
-            video_height: 180,
-            video_fps: 5,
-            video_jpeg_quality: 0.55,
-            video_max_frame_bytes: 512000,
+            video_width: 1280,
+            video_height: 720,
+            video_fps: 15,
+            video_jpeg_quality: 0.85,
+            video_max_frame_bytes: 200000,
             video_iframe_interval: 15,
         });
     }
+}
+
+#[spacetimedb::reducer]
+pub fn reset_media_settings(ctx: &ReducerContext) -> Result<(), String> {
+    let s = ctx
+        .db
+        .media_settings()
+        .id()
+        .find(&1)
+        .ok_or_else(|| "media_settings singleton not found".to_string())?;
+
+    ctx.db.media_settings().id().update(MediaSettings {
+        audio_target_sample_rate: 48000,
+        audio_frame_ms: 20,
+        audio_max_frame_bytes: 10000,
+        video_fps: 15,
+        video_jpeg_quality: 0.85,
+        video_max_frame_bytes: 200000,
+        video_iframe_interval: 15,
+        ..s
+    });
+
+    Ok(())
 }
 
 #[spacetimedb::reducer(client_connected)]
@@ -479,7 +502,7 @@ pub fn send_audio_frame(
         return Err("Not a joined participant".to_string());
     }
 
-    if pcm16le.len() > 64_000 {
+    if pcm16le.len() > 10_000 {
         return Err("Audio frame too large".to_string());
     }
 
@@ -529,7 +552,7 @@ pub fn send_video_frame(
         return Err("Not a joined participant".to_string());
     }
 
-    if jpeg.len() > 512_000 {
+    if jpeg.len() > 200_000 {
         return Err("Video frame too large".to_string());
     }
 

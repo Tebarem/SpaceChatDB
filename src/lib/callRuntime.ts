@@ -9,6 +9,7 @@ export type PeerState = { hex: string; talking: boolean; videoUrl: string | null
 export const remotePeers = writable<Map<string, PeerState>>(new Map());
 
 const AUDIO_JITTER_FRAMES = 2;   // ~40ms at 20ms frame time
+const SILENCE_HOLDOFF_FRAMES = 20; // tail before suppressing (400ms at 20ms/frame)
 const VIDEO_JITTER_FRAMES = 2;   // buffer depth before draining
 const MAX_AUDIO_QUEUE_S = 0.25;  // hard cap: reset clock if queue exceeds 250ms, preventing runaway lag
 
@@ -237,7 +238,7 @@ function setTalking(hex: string, value: boolean) {
 }
 
 function displayVideoFrame(peer: PerPeerRuntime, jpeg: Uint8Array) {
-  const blob = new Blob([jpeg], { type: 'image/jpeg' });
+  const blob = new Blob([jpeg], { type: 'image/webp' });
   const url = URL.createObjectURL(blob);
   if (peer.lastVideoUrl) URL.revokeObjectURL(peer.lastVideoUrl);
   peer.lastVideoUrl = url;
@@ -273,6 +274,8 @@ function drainAudioBuffer(peer: PerPeerRuntime, cfg: MediaSettings) {
 }
 
 function drainVideoBuffer(peer: PerPeerRuntime, cfg: MediaSettings) {
+  let latestJpeg: Uint8Array | null = null; // collect last displayable frame
+
   while (peer.videoJitterBuffer.has(peer.recvSeqVideo)) {
     const entry = peer.videoJitterBuffer.get(peer.recvSeqVideo)!;
 
@@ -286,7 +289,9 @@ function drainVideoBuffer(peer: PerPeerRuntime, cfg: MediaSettings) {
       const playingAudioSeq = Math.max(0, peer.recvSeqAudio - bufferedAheadFrames);
       const targetAudioSeq = Math.round(entry.seq * 1000 / (cfg.video_fps * cfg.audio_frame_ms));
       const MAX_AUDIO_LEAD = Math.ceil(1000 / cfg.audio_frame_ms); // ~1 s safety valve
-      if (targetAudioSeq > playingAudioSeq && targetAudioSeq - playingAudioSeq < MAX_AUDIO_LEAD) {
+      const audioQueueDry =
+        peer.nextPlayTime <= peer.audioCtx.currentTime + (cfg.audio_frame_ms / 1000) * 2;
+      if (!audioQueueDry && targetAudioSeq > playingAudioSeq && targetAudioSeq - playingAudioSeq < MAX_AUDIO_LEAD) {
         break; // audio hasn't caught up yet; wait
       }
     }
@@ -295,8 +300,11 @@ function drainVideoBuffer(peer: PerPeerRuntime, cfg: MediaSettings) {
     peer.recvSeqVideo++;
     if (!entry.isIframe && peer.lastVideoIframeSeq === -1) continue;
     if (entry.isIframe) peer.lastVideoIframeSeq = entry.seq;
-    displayVideoFrame(peer, entry.jpeg);
+    latestJpeg = entry.jpeg; // overwrite — keep only the last one
   }
+
+  if (latestJpeg) displayVideoFrame(peer, latestJpeg); // single blob/URL creation per drain
+
   if (peer.videoJitterBuffer.size > 0) {
     const minSeq = Math.min(...peer.videoJitterBuffer.keys());
     const gap = minSeq - peer.recvSeqVideo;
@@ -404,23 +412,29 @@ async function startOrRestartVideo(rt: ActiveRuntime, room: any) {
   const roomId = room.room_id ?? room.roomId;
   const roomIdStr = rt.roomIdStr;
 
+  let capturing = false;
+
   rt.videoTimer = window.setInterval(async () => {
     if (!runtime || runtime.roomIdStr !== roomIdStr) return;
-    if (!g) return;
+    if (!g || capturing) return; // guard: skip if previous capture in progress
+    capturing = true;
+    try {
+      g.drawImage(videoEl, 0, 0, w, h);
 
-    g.drawImage(videoEl, 0, 0, w, h);
+      const blob: Blob | null = await new Promise((resolve) => canvas.toBlob((b) => resolve(b), 'image/webp', q));
+      if (!blob) return;
+      if (blob.size > rt.cfg.video_max_frame_bytes) return;
 
-    const blob: Blob | null = await new Promise((resolve) => canvas.toBlob((b) => resolve(b), 'image/jpeg', q));
-    if (!blob) return;
-    if (blob.size > rt.cfg.video_max_frame_bytes) return;
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const seq = rt.sendSeqVideo++;
+      const isIframe = (seq % rt.cfg.video_iframe_interval) === 0;
 
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    const seq = rt.sendSeqVideo++;
-    const isIframe = (seq % rt.cfg.video_iframe_interval) === 0;
-
-    safeSendReducer(rt.conn, 'send_video_frame', 'sendVideoFrame', {
-      room_id: roomId, roomId, seq, width: w, height: h, is_iframe: isIframe, isIframe, jpeg: bytes
-    });
+      safeSendReducer(rt.conn, 'send_video_frame', 'sendVideoFrame', {
+        room_id: roomId, roomId, seq, width: w, height: h, is_iframe: isIframe, isIframe, jpeg: bytes
+      });
+    } finally {
+      capturing = false;
+    }
   }, intervalMs);
 
   rt.stopFns.push(() => {
@@ -521,6 +535,7 @@ export async function startCallRuntime(
   const blockIn = Math.max(1, Math.floor(inRate * (frameMs / 1000)));
 
   let bufferIn = new Float32Array(0);
+  let silenceFrameCount = 0;
   const roomId = room.room_id ?? room.roomId;
 
   node.port.onmessage = (ev: MessageEvent<Float32Array>) => {
@@ -541,6 +556,16 @@ export async function startCallRuntime(
       const { bytes, rms } = floatToMulawBytes(resampled);
 
       if (bytes.length > runtime.cfg.audio_max_frame_bytes) continue;
+
+      const isTalking = rms >= runtime.cfg.audio_talking_rms_threshold;
+      if (isTalking) {
+        silenceFrameCount = 0;
+      } else {
+        silenceFrameCount++;
+        if (silenceFrameCount > SILENCE_HOLDOFF_FRAMES) {
+          continue; // suppress — do NOT increment sendSeqAudio
+        }
+      }
 
       const seq = runtime.sendSeqAudio++;
 
