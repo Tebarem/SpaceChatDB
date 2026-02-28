@@ -5,8 +5,29 @@ import { mediaSettingsStore, type MediaSettings } from './mediaSettings';
 
 export const localVideoStream = writable<MediaStream | null>(null);
 
-export type PeerState = { hex: string; talking: boolean; videoUrl: string | null };
+export type PeerState = {
+  hex: string;
+  talking: boolean;
+  videoUrl: string | null;
+  muted: boolean;
+  serverMuted: boolean;
+  camOff: boolean;
+  deafened: boolean;
+};
 export const remotePeers = writable<Map<string, PeerState>>(new Map());
+
+export const localMuted       = writable<boolean>(false);
+export const localDeafened    = writable<boolean>(false);
+export const localCamOff      = writable<boolean>(false);
+export const localServerMuted = writable<boolean>(false);
+export const activeSpeakerHex = writable<string | null>(null);
+
+// null = show all (no spotlight mode); Set = only decode video for these hexes
+export const visibleVideoHexes = writable<Set<string> | null>(null);
+
+export function setVisibleVideoHexes(hexes: Set<string> | null): void {
+  visibleVideoHexes.set(hexes);
+}
 
 const AUDIO_JITTER_FRAMES = 2;   // ~40ms at 20ms frame time
 const SILENCE_HOLDOFF_FRAMES = 20; // tail before suppressing (400ms at 20ms/frame)
@@ -235,6 +256,19 @@ function setTalking(hex: string, value: boolean) {
     if (!p) return m;
     return new Map(m).set(hex, { ...p, talking: value });
   });
+  if (value) {
+    activeSpeakerHex.set(hex);
+  } else {
+    activeSpeakerHex.update((cur) => (cur === hex ? null : cur));
+  }
+}
+
+export function updatePeerMediaState(hex: string, muted: boolean, deafened: boolean, camOff: boolean, serverMuted: boolean): void {
+  remotePeers.update((m) => {
+    const p = m.get(hex);
+    if (!p) return m;
+    return new Map(m).set(hex, { ...p, muted, deafened, camOff, serverMuted });
+  });
 }
 
 function displayVideoFrame(peer: PerPeerRuntime, jpeg: Uint8Array) {
@@ -335,7 +369,7 @@ function updateRemotePeersStore() {
   const next = new Map<string, PeerState>();
   for (const [hex] of runtime.peers) {
     const existing = current.get(hex);
-    next.set(hex, existing ?? { hex, talking: false, videoUrl: null });
+    next.set(hex, existing ?? { hex, talking: false, videoUrl: null, muted: false, serverMuted: false, camOff: false, deafened: false });
   }
   remotePeers.set(next);
 }
@@ -417,6 +451,7 @@ async function startOrRestartVideo(rt: ActiveRuntime, room: any) {
   rt.videoTimer = window.setInterval(async () => {
     if (!runtime || runtime.roomIdStr !== roomIdStr) return;
     if (!g || capturing) return; // guard: skip if previous capture in progress
+    if (get(localCamOff)) return;
     capturing = true;
     try {
       g.drawImage(videoEl, 0, 0, w, h);
@@ -540,6 +575,7 @@ export async function startCallRuntime(
 
   node.port.onmessage = (ev: MessageEvent<Float32Array>) => {
     if (!runtime || runtime.roomIdStr !== roomIdStr) return;
+    if (get(localMuted) || get(localServerMuted)) return;
     const chunk = ev.data;
     if (!(chunk instanceof Float32Array)) return;
 
@@ -615,6 +651,12 @@ export function stopCallRuntime() {
   runtime = null;
   localVideoStream.set(null);
   remotePeers.set(new Map());
+  localMuted.set(false);
+  localDeafened.set(false);
+  localCamOff.set(false);
+  localServerMuted.set(false);
+  activeSpeakerHex.set(null);
+  visibleVideoHexes.set(null);
 }
 
 export function handleAudioEvent(row: any) {
@@ -629,6 +671,7 @@ export function handleAudioEvent(row: any) {
 
   const peer = runtime.peers.get(fromHex);
   if (!peer) return;
+  if (get(localDeafened)) return;
 
   const bytes = getBytes(row, ['pcm16le', 'pcm16Le', 'pcm16_le', 'pcm_16le']);
   if (!bytes) return;
@@ -665,6 +708,9 @@ export function handleVideoEvent(row: any) {
 
   const peer = runtime.peers.get(fromHex);
   if (!peer) return;
+
+  const visible = get(visibleVideoHexes);
+  if (visible !== null && !visible.has(fromHex)) return; // not in viewport — discard frame
 
   const jpeg = getBytes(row, ['jpeg']);
   if (!jpeg) return;

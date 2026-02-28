@@ -9,7 +9,10 @@ import {
   startCallRuntime,
   addPeer,
   removePeer,
-  getRuntimePeerHexes
+  getRuntimePeerHexes,
+  localServerMuted,
+  localMuted,
+  updatePeerMediaState,
 } from './callRuntime';
 import { mediaSettingsStore, type MediaSettings } from './mediaSettings';
 
@@ -442,12 +445,49 @@ function attachRowCallbacks(conn: DbConnection) {
   participantT.onInsert(
     safe('call_participant.onInsert', (_e: any, row: any) => {
       callParticipantsStore.update((p) => upsertByKey(p, 'id', row));
+      const meHex = get(identityStore)?.toHexString?.() ?? '';
+      const rowHex = row.identity?.toHexString?.() ?? '';
+      if (rowHex !== meHex) {
+        updatePeerMediaState(
+          rowHex,
+          !!row.muted,
+          !!(row.deafened),
+          !!(row.cam_off ?? row.camOff),
+          !!(row.server_muted ?? row.serverMuted)
+        );
+      }
       triggerCallUi();
     })
   );
   participantT.onUpdate(
     safe('call_participant.onUpdate', (_e: any, _old: any, row: any) => {
       callParticipantsStore.update((p) => upsertByKey(p, 'id', row));
+
+      const meHex = get(identityStore)?.toHexString?.() ?? '';
+      const rowHex = row.identity?.toHexString?.() ?? '';
+
+      if (rowHex === meHex) {
+        // Our own row: reflect server_muted back into callRuntime
+        const sm = !!(row.server_muted ?? row.serverMuted);
+        localServerMuted.set(sm);
+        if (sm) {
+          localMuted.set(true); // force UI mute indicator on when server-muted
+        } else {
+          // When server unlocks us, reflect the server's actual muted state
+          // (unmute_all sets muted=false, so this clears the localMuted flag)
+          localMuted.set(!!(row.muted));
+        }
+      } else {
+        // Remote peer's row: update their PeerState media fields
+        updatePeerMediaState(
+          rowHex,
+          !!(row.muted),
+          !!(row.deafened),
+          !!(row.cam_off ?? row.camOff),
+          !!(row.server_muted ?? row.serverMuted)
+        );
+      }
+
       triggerCallUi();
     })
   );
@@ -717,4 +757,38 @@ export function inviteToRoom(roomId: Uuid, target: Identity) {
   const conn = get(connStore);
   if (!conn) return;
   swallow(callReducerArgs(conn, 'invite_to_room', 'inviteToRoom', { room_id: roomId, roomId, target }));
+}
+
+export function setMediaState(roomId: Uuid, muted: boolean, deafened: boolean, camOff: boolean) {
+  const conn = get(connStore);
+  if (!conn) return;
+  swallow(callReducerArgs(conn, 'set_media_state', 'setMediaState', {
+    room_id: roomId, roomId, muted, deafened, cam_off: camOff, camOff
+  }));
+}
+
+export function muteAll(roomId: Uuid) {
+  const conn = get(connStore);
+  if (!conn) return;
+  swallow(callReducerArgs(conn, 'mute_all', 'muteAll', { room_id: roomId, roomId }));
+}
+
+export function unmuteAll(roomId: Uuid) {
+  const conn = get(connStore);
+  if (!conn) return;
+  swallow(callReducerArgs(conn, 'unmute_all', 'unmuteAll', { room_id: roomId, roomId }));
+}
+
+export function kickParticipant(roomId: Uuid, target: Identity) {
+  const conn = get(connStore);
+  if (!conn) return;
+  swallow(callReducerArgs(conn, 'kick_participant', 'kickParticipant', { room_id: roomId, roomId, target }));
+}
+
+export function setParticipantServerMuted(roomId: Uuid, target: Identity, locked: boolean) {
+  const conn = get(connStore);
+  if (!conn) return;
+  swallow(callReducerArgs(conn, 'set_participant_server_muted', 'setParticipantServerMuted', {
+    room_id: roomId, roomId, target, locked
+  }));
 }

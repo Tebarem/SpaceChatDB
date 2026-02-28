@@ -38,11 +38,17 @@ import CreateRoomReducer from "./create_room_reducer";
 import DeclineInviteReducer from "./decline_invite_reducer";
 import InviteToRoomReducer from "./invite_to_room_reducer";
 import JoinRoomReducer from "./join_room_reducer";
+import KickParticipantReducer from "./kick_participant_reducer";
 import LeaveRoomReducer from "./leave_room_reducer";
+import MuteAllReducer from "./mute_all_reducer";
+import ResetMediaSettingsReducer from "./reset_media_settings_reducer";
 import SendAudioFrameReducer from "./send_audio_frame_reducer";
 import SendMessageReducer from "./send_message_reducer";
 import SendVideoFrameReducer from "./send_video_frame_reducer";
+import SetMediaStateReducer from "./set_media_state_reducer";
 import SetNicknameReducer from "./set_nickname_reducer";
+import SetParticipantServerMutedReducer from "./set_participant_server_muted_reducer";
+import UnmuteAllReducer from "./unmute_all_reducer";
 
 // Import all procedure arg schemas
 
@@ -144,11 +150,17 @@ const reducersSchema = __reducers(
   __reducerSchema("decline_invite", DeclineInviteReducer),
   __reducerSchema("invite_to_room", InviteToRoomReducer),
   __reducerSchema("join_room", JoinRoomReducer),
+  __reducerSchema("kick_participant", KickParticipantReducer),
   __reducerSchema("leave_room", LeaveRoomReducer),
+  __reducerSchema("mute_all", MuteAllReducer),
+  __reducerSchema("reset_media_settings", ResetMediaSettingsReducer),
   __reducerSchema("send_audio_frame", SendAudioFrameReducer),
   __reducerSchema("send_message", SendMessageReducer),
   __reducerSchema("send_video_frame", SendVideoFrameReducer),
+  __reducerSchema("set_media_state", SetMediaStateReducer),
   __reducerSchema("set_nickname", SetNicknameReducer),
+  __reducerSchema("set_participant_server_muted", SetParticipantServerMutedReducer),
+  __reducerSchema("unmute_all", UnmuteAllReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

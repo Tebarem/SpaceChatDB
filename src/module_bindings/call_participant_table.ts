@@ -23,4 +23,8 @@ export default __t.row({
   },
   invitedBy: __t.identity().name("invited_by"),
   joinedAt: __t.option(__t.timestamp()).name("joined_at"),
+  muted: __t.bool(),
+  deafened: __t.bool(),
+  camOff: __t.bool().name("cam_off"),
+  serverMuted: __t.bool().name("server_muted"),
 });

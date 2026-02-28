@@ -30,6 +30,10 @@ export const CallParticipant = __t.object("CallParticipant", {
   },
   invitedBy: __t.identity(),
   joinedAt: __t.option(__t.timestamp()),
+  muted: __t.bool(),
+  deafened: __t.bool(),
+  camOff: __t.bool(),
+  serverMuted: __t.bool(),
 });
 export type CallParticipant = __Infer<typeof CallParticipant>;
 

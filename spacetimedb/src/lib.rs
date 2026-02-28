@@ -57,6 +57,10 @@ pub struct CallParticipant {
     pub state: ParticipantState,
     pub invited_by: Identity,
     pub joined_at: Option<Timestamp>,
+    pub muted: bool,
+    pub deafened: bool,
+    pub cam_off: bool,
+    pub server_muted: bool,
 }
 
 /*
@@ -314,6 +318,10 @@ pub fn create_room(
         state: ParticipantState::Joined,
         invited_by: creator,
         joined_at: Some(now),
+        muted: false,
+        deafened: false,
+        cam_off: false,
+        server_muted: false,
     });
 
     for target in targets {
@@ -324,6 +332,10 @@ pub fn create_room(
             state: ParticipantState::Invited,
             invited_by: creator,
             joined_at: None,
+            muted: false,
+            deafened: false,
+            cam_off: false,
+            server_muted: false,
         });
     }
 
@@ -378,6 +390,10 @@ pub fn invite_to_room(
         state: ParticipantState::Invited,
         invited_by: who,
         joined_at: None,
+        muted: false,
+        deafened: false,
+        cam_off: false,
+        server_muted: false,
     });
 
     Ok(())
@@ -492,14 +508,15 @@ pub fn send_audio_frame(
 ) -> Result<(), String> {
     let who = ctx.sender();
 
-    let is_joined = ctx
+    let participant = ctx
         .db
         .call_participant()
         .by_room()
         .filter(&room_id)
-        .any(|p| p.identity == who && p.state == ParticipantState::Joined);
-    if !is_joined {
-        return Err("Not a joined participant".to_string());
+        .find(|p| p.identity == who && p.state == ParticipantState::Joined)
+        .ok_or_else(|| "Not a joined participant".to_string())?;
+    if participant.muted || participant.server_muted {
+        return Ok(()); // silently drop — client-side gate is the UX, this is defence-in-depth
     }
 
     if pcm16le.len() > 10_000 {
@@ -542,14 +559,15 @@ pub fn send_video_frame(
         return Err("Not a video room".to_string());
     }
 
-    let is_joined = ctx
+    let participant = ctx
         .db
         .call_participant()
         .by_room()
         .filter(&room_id)
-        .any(|p| p.identity == who && p.state == ParticipantState::Joined);
-    if !is_joined {
-        return Err("Not a joined participant".to_string());
+        .find(|p| p.identity == who && p.state == ParticipantState::Joined)
+        .ok_or_else(|| "Not a joined participant".to_string())?;
+    if participant.cam_off {
+        return Ok(());
     }
 
     if jpeg.len() > 200_000 {
@@ -566,5 +584,156 @@ pub fn send_video_frame(
         jpeg,
     });
 
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn set_media_state(
+    ctx: &ReducerContext,
+    room_id: Uuid,
+    muted: bool,
+    deafened: bool,
+    cam_off: bool,
+) -> Result<(), String> {
+    let who = ctx.sender();
+    let participant = ctx
+        .db
+        .call_participant()
+        .by_room()
+        .filter(&room_id)
+        .find(|p| p.identity == who && p.state == ParticipantState::Joined)
+        .ok_or_else(|| "Not a joined participant".to_string())?;
+    // Cannot unmute self when server_muted
+    let effective_muted = if participant.server_muted { true } else { muted };
+    ctx.db.call_participant().id().update(CallParticipant {
+        muted: effective_muted,
+        deafened,
+        cam_off,
+        ..participant
+    });
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn mute_all(ctx: &ReducerContext, room_id: Uuid) -> Result<(), String> {
+    let who = ctx.sender();
+    let room = ctx
+        .db
+        .call_room()
+        .room_id()
+        .find(&room_id)
+        .ok_or_else(|| "Room not found".to_string())?;
+    if room.creator != who {
+        return Err("Only the host can mute all".to_string());
+    }
+    let to_update: Vec<CallParticipant> = ctx
+        .db
+        .call_participant()
+        .by_room()
+        .filter(&room_id)
+        .filter(|p| p.state == ParticipantState::Joined && p.identity != who)
+        .collect();
+    for p in to_update {
+        ctx.db.call_participant().id().update(CallParticipant {
+            server_muted: true,
+            muted: true,
+            ..p
+        });
+    }
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn unmute_all(ctx: &ReducerContext, room_id: Uuid) -> Result<(), String> {
+    let who = ctx.sender();
+    let room = ctx
+        .db
+        .call_room()
+        .room_id()
+        .find(&room_id)
+        .ok_or_else(|| "Room not found".to_string())?;
+    if room.creator != who {
+        return Err("Only the host can unmute all".to_string());
+    }
+    let to_update: Vec<CallParticipant> = ctx
+        .db
+        .call_participant()
+        .by_room()
+        .filter(&room_id)
+        .filter(|p| p.state == ParticipantState::Joined && p.identity != who)
+        .collect();
+    for p in to_update {
+        ctx.db.call_participant().id().update(CallParticipant {
+            server_muted: false,
+            muted: false,
+            ..p
+        });
+    }
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn kick_participant(
+    ctx: &ReducerContext,
+    room_id: Uuid,
+    target: Identity,
+) -> Result<(), String> {
+    let who = ctx.sender();
+    let room = ctx
+        .db
+        .call_room()
+        .room_id()
+        .find(&room_id)
+        .ok_or_else(|| "Room not found".to_string())?;
+    if room.creator != who {
+        return Err("Only the host can kick participants".to_string());
+    }
+    if target == who {
+        return Err("Cannot kick yourself".to_string());
+    }
+    let participant = ctx
+        .db
+        .call_participant()
+        .by_room()
+        .filter(&room_id)
+        .find(|p| p.identity == target)
+        .ok_or_else(|| "Participant not found".to_string())?;
+    ctx.db.call_participant().id().delete(&participant.id);
+    cleanup_room_if_empty(ctx, room_id);
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn set_participant_server_muted(
+    ctx: &ReducerContext,
+    room_id: Uuid,
+    target: Identity,
+    locked: bool,
+) -> Result<(), String> {
+    let who = ctx.sender();
+    let room = ctx
+        .db
+        .call_room()
+        .room_id()
+        .find(&room_id)
+        .ok_or_else(|| "Room not found".to_string())?;
+    if room.creator != who {
+        return Err("Only the host can change server mute".to_string());
+    }
+    if target == who {
+        return Err("Cannot server-mute yourself".to_string());
+    }
+    let participant = ctx
+        .db
+        .call_participant()
+        .by_room()
+        .filter(&room_id)
+        .find(|p| p.identity == target && p.state == ParticipantState::Joined)
+        .ok_or_else(|| "Target not found".to_string())?;
+    ctx.db.call_participant().id().update(CallParticipant {
+        server_muted: locked,
+        muted: if locked { true } else { participant.muted },
+        ..participant
+    });
     Ok(())
 }

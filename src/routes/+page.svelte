@@ -21,9 +21,14 @@
     setNickname,
     shortHex,
     identityHex,
-    connStore
+    connStore,
+    setMediaState,
+    muteAll,
+    unmuteAll,
+    setParticipantServerMuted,
+    kickParticipant
   } from '$lib/stdb';
-  import { startCallRuntime, stopCallRuntime, localVideoStream, remotePeers, type PeerState } from '$lib/callRuntime';
+  import { startCallRuntime, stopCallRuntime, localVideoStream, remotePeers, type PeerState, localMuted, localDeafened, localCamOff, localServerMuted, activeSpeakerHex, setVisibleVideoHexes } from '$lib/callRuntime';
 
   let messageText = '';
   let nicknameText = '';
@@ -31,6 +36,26 @@
 
   let messagesEl: HTMLDivElement | null = null;
   let lastScrollKey = '';
+
+  const STRIP_LIMIT = 4;
+
+  const icons = {
+    mic: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>`,
+    micOff: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="22" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 14 0v-2"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" y1="19" x2="12" y2="22"/></svg>`,
+    camera: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 8-6 4 6 4V8z"/><rect width="14" height="12" x="2" y="6" rx="2" ry="2"/></svg>`,
+    cameraOff: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="22" y2="22"/><path d="M7 7H4a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12"/><path d="M9.5 4h5l2 2h3"/><path d="M22 8v7.5"/></svg>`,
+    headphones: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"/></svg>`,
+    headphonesOff: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 14h-1.5"/><path d="M3 14H1.5"/><path d="m2 2 20 20"/><path d="M12 5a9 9 0 0 1 8.34 5.58"/><path d="M3.66 10.57A9 9 0 0 1 12 5"/><path d="M5 14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-5"/><path d="M19 14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2"/></svg>`,
+    pin: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17"/></svg>`,
+    pinOff: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="22" y2="22"/><line x1="12" y1="17" x2="12" y2="22"/><path d="M9 9v1.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h12"/><path d="M15 9.34V6h1a2 2 0 0 0 0-4H7.89"/></svg>`,
+    lock: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`,
+    unlock: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>`,
+    volumeX: `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="22" y1="9" x2="16" y2="15"/><line x1="16" y1="9" x2="22" y2="15"/></svg>`,
+    volume2: `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`,
+    eye: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`,
+    eyeOff: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="2" y1="2" x2="22" y2="22"/></svg>`,
+    userMinus: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="22" y1="11" x2="16" y2="11"/></svg>`,
+  };
 
   type MenuState = { open: boolean; x: number; y: number; target: any | null };
   let menu: MenuState = { open: false, x: 0, y: 0, target: null };
@@ -171,12 +196,14 @@
     stopCallRuntime();
   }
 
-  function joinedCount(room: any): number {
+  $: callCount = (() => {
+    const room = $activeCallStore;
+    if (!room) return 0;
     const rid = roomIdOfAny(room);
     return ($callParticipantsStore ?? []).filter(
       (p) => tagLower(p.state) === 'joined' && roomIdOfAny(p) === rid
     ).length;
-  }
+  })();
 
   function invitedByDisplay(invite: any): string {
     const invitedBy = invite?.invited_by ?? invite?.invitedBy;
@@ -229,6 +256,91 @@
               : totalVideoTiles <= 4 ? 2
               : totalVideoTiles <= 9 ? 3
               : 4;
+
+  let autoSpotlight = false;
+  let pinnedSpotlightHex: string | null = null;
+
+  $: isHost = (() => {
+    const room = $activeCallStore;
+    if (!room || !$identityStore) return false;
+    return (room.creator?.toHexString?.() ?? '') === identityHex($identityStore);
+  })();
+
+  $: if ($activeCallStore) {
+    const roomId = $activeCallStore.room_id ?? $activeCallStore.roomId;
+    setMediaState(roomId, $localMuted, $localDeafened, $localCamOff);
+  }
+
+  $: participantByHex = (() => {
+    const m = new Map<string, any>();
+    const room = $activeCallStore;
+    if (!room) return m;
+    const rid = roomIdOfAny(room);
+    for (const p of $callParticipantsStore) {
+      if (roomIdOfAny(p) === rid && tagLower(p.state) === 'joined') {
+        const h = p.identity?.toHexString?.() ?? '';
+        if (h) m.set(h, p);
+      }
+    }
+    return m;
+  })();
+
+  $: myHex = identityHex($identityStore);
+  // pinnedSpotlightHex takes priority over auto-detected active speaker
+  $: spotlightHex = pinnedSpotlightHex
+    ?? (autoSpotlight && $activeSpeakerHex && $activeSpeakerHex !== myHex ? $activeSpeakerHex : null);
+
+  function peerMuted(hex: string)       { const p = participantByHex.get(hex); return !!(p?.muted); }
+  function peerServerMuted(hex: string) { const p = participantByHex.get(hex); return !!(p?.server_muted ?? p?.serverMuted); }
+  function peerCamOff(hex: string)      { const p = participantByHex.get(hex); return !!(p?.cam_off ?? p?.camOff); }
+  function peerDeafened(hex: string)    { const p = participantByHex.get(hex); return !!(p?.deafened); }
+
+  function handleMuteAll() {
+    const room = $activeCallStore;
+    if (room) muteAll(room.room_id ?? room.roomId);
+  }
+
+  function handleUnmuteAll() {
+    const room = $activeCallStore;
+    if (room) unmuteAll(room.room_id ?? room.roomId);
+  }
+
+  function handleToggleLock(p: any) {
+    const room = $activeCallStore;
+    if (!room) return;
+    const locked = !!(p.server_muted ?? p.serverMuted);
+    setParticipantServerMuted(room.room_id ?? room.roomId, p.identity, !locked);
+  }
+
+  function handleKick(p: any) {
+    const room = $activeCallStore;
+    if (!room) return;
+    kickParticipant(room.room_id ?? room.roomId, p.identity);
+  }
+
+  function togglePinnedSpotlight(hex: string) {
+    pinnedSpotlightHex = pinnedSpotlightHex === hex ? null : hex;
+    closeMenu();
+  }
+
+  $: thumbnailPeers = (() => {
+    const all = Array.from($remotePeers.values()).filter(p => p.hex !== spotlightHex);
+    all.sort((a, b) => (b.talking ? 1 : 0) - (a.talking ? 1 : 0));
+    return all;
+  })();
+
+  $: visibleThumbnails = thumbnailPeers.slice(0, STRIP_LIMIT);
+  $: hiddenCount = Math.max(0, thumbnailPeers.length - STRIP_LIMIT);
+
+  // Sync visible set to callRuntime for video gate
+  $: {
+    if (spotlightHex) {
+      const hexes = new Set<string>([spotlightHex, ...visibleThumbnails.map(p => p.hex)]);
+      setVisibleVideoHexes(hexes);
+    } else {
+      setVisibleVideoHexes(null); // show all in grid mode
+    }
+  }
 </script>
 
 <div class="app" on:keydown={onKeyDown}>
@@ -259,7 +371,7 @@
         <div class="sidebarHeader">
           <div>
             <div class="callTitle">{callTypeLabel($activeCallStore)} Call</div>
-            <div class="callCount">{joinedCount($activeCallStore)} joined</div>
+            <div class="callCount">{callCount} joined</div>
           </div>
           <button class="btn danger" on:click={() => hangup($activeCallStore)}>Leave</button>
         </div>
@@ -281,41 +393,186 @@
 
       <!-- Right: video or voice grid -->
       {#if callTypeTag($activeCallStore) === 'video'}
-        <div class="videoGrid" style="grid-template-columns: repeat({gridCols}, 1fr)">
-          <!-- Local tile -->
-          <div class="videoTile">
-            <video class="videoFeed" autoplay playsinline muted bind:this={localEl}></video>
-            <div class="tileLabel">You</div>
-          </div>
-          <!-- Remote tiles -->
-          {#each Array.from($remotePeers.values()) as peer (peer.hex)}
-            <div class="videoTile" class:talking={peer.talking}>
-              {#if peer.videoUrl}
-                <img class="videoFeed" src={peer.videoUrl} alt="video" />
-              {:else}
-                <div class="tilePlaceholder">
-                  <div class="initials">{getInitials(peer.hex)}</div>
+        <div class="videoArea">
+          {#if spotlightHex}
+            <!-- Spotlight layout -->
+            <div class="spotlightLayout">
+              <div class="spotlightMain">
+                {#if $remotePeers.get(spotlightHex)?.videoUrl && !peerCamOff(spotlightHex)}
+                  <img class="videoFeed" src={$remotePeers.get(spotlightHex)?.videoUrl ?? ''} alt="spotlight" />
+                {:else}
+                  <div class="tilePlaceholder"><div class="initials">{getInitials(spotlightHex)}</div></div>
+                {/if}
+                <div class="tileLabel">{displayIdentityHex(spotlightHex)}</div>
+                <div class="tileOverlays">
+                  {#if peerMuted(spotlightHex)}<span class="overlayIcon" class:serverMuted={peerServerMuted(spotlightHex)}>{@html icons.micOff}</span>{/if}
+                  {#if peerCamOff(spotlightHex)}<span class="overlayIcon">{@html icons.cameraOff}</span>{/if}
                 </div>
-              {/if}
-              <div class="tileLabel">{displayIdentityHex(peer.hex)}</div>
+              </div>
+              <div class="thumbnailStrip">
+                <div class="thumbTile">
+                  <video class="videoFeed" autoplay playsinline muted bind:this={localEl}></video>
+                  <div class="tileLabel">You</div>
+                  {#if $localMuted || $localServerMuted}
+                    <div class="tileOverlays"><span class="overlayIcon">{@html icons.micOff}</span></div>
+                  {/if}
+                </div>
+                {#each visibleThumbnails as peer (peer.hex)}
+                  <div class="thumbTile" class:talking={peer.talking} on:click={() => { pinnedSpotlightHex = peer.hex; }}>
+                    {#if peer.videoUrl && !peerCamOff(peer.hex)}
+                      <img class="videoFeed" src={peer.videoUrl} alt="thumb" />
+                    {:else}
+                      <div class="tilePlaceholder"><div class="initials small">{getInitials(peer.hex)}</div></div>
+                    {/if}
+                    <div class="tileLabel">{displayIdentityHex(peer.hex)}</div>
+                    <div class="tileOverlays">
+                      {#if peerMuted(peer.hex)}<span class="overlayIcon" class:serverMuted={peerServerMuted(peer.hex)}>{@html icons.micOff}</span>{/if}
+                      {#if peerCamOff(peer.hex)}<span class="overlayIcon">{@html icons.cameraOff}</span>{/if}
+                    </div>
+                  </div>
+                {/each}
+                {#if hiddenCount > 0}
+                  <div class="thumbTile overflowChip">
+                    <div class="overflowCount">+{hiddenCount}</div>
+                    <div class="tileLabel">more</div>
+                  </div>
+                {/if}
+              </div>
             </div>
-          {/each}
+          {:else}
+            <!-- Normal grid layout -->
+            <div class="videoGrid" style="grid-template-columns: repeat({gridCols}, 1fr)">
+              <div class="videoTile">
+                <video class="videoFeed" autoplay playsinline muted bind:this={localEl}></video>
+                <div class="tileLabel">You</div>
+                <div class="tileOverlays">
+                  {#if $localMuted || $localServerMuted}<span class="overlayIcon" class:serverMuted={$localServerMuted}>{@html icons.micOff}</span>{/if}
+                  {#if $localCamOff}<span class="overlayIcon">{@html icons.cameraOff}</span>{/if}
+                </div>
+              </div>
+              {#each Array.from($remotePeers.values()) as peer (peer.hex)}
+                <div class="videoTile" class:talking={peer.talking}>
+                  {#if peer.videoUrl && !peerCamOff(peer.hex)}
+                    <img class="videoFeed" src={peer.videoUrl} alt="video" />
+                  {:else}
+                    <div class="tilePlaceholder"><div class="initials">{getInitials(peer.hex)}</div></div>
+                  {/if}
+                  <div class="tileLabel">{displayIdentityHex(peer.hex)}</div>
+                  <div class="tileOverlays">
+                    {#if peerMuted(peer.hex)}<span class="overlayIcon" class:serverMuted={peerServerMuted(peer.hex)}>{@html icons.micOff}</span>{/if}
+                    {#if peerCamOff(peer.hex)}<span class="overlayIcon">{@html icons.cameraOff}</span>{/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+
+          <!-- HUD -->
+          <div class="hud">
+            <button
+              class="hudBtn" class:active={$localMuted || $localServerMuted}
+              disabled={$localServerMuted}
+              title={$localServerMuted ? 'Muted by host' : $localMuted ? 'Unmute' : 'Mute mic'}
+              on:click={() => localMuted.update(v => !v)}
+            >{@html $localMuted || $localServerMuted ? icons.micOff : icons.mic}</button>
+            <button
+              class="hudBtn" class:active={$localCamOff}
+              title={$localCamOff ? 'Enable camera' : 'Disable camera'}
+              on:click={() => localCamOff.update(v => !v)}
+            >{@html $localCamOff ? icons.cameraOff : icons.camera}</button>
+            <button
+              class="hudBtn" class:active={$localDeafened}
+              title={$localDeafened ? 'Undeafen' : 'Deafen'}
+              on:click={() => localDeafened.update(v => !v)}
+            >{@html $localDeafened ? icons.headphonesOff : icons.headphones}</button>
+            <button
+              class="hudBtn" class:active={autoSpotlight}
+              title={autoSpotlight ? 'Disable auto-spotlight' : 'Enable auto-spotlight'}
+              on:click={() => autoSpotlight = !autoSpotlight}
+            >{@html autoSpotlight ? icons.pin : icons.pinOff}</button>
+            {#if pinnedSpotlightHex}
+              <button
+                class="hudBtn active"
+                title="Unpin spotlight"
+                on:click={() => pinnedSpotlightHex = null}
+              >{@html icons.eyeOff}</button>
+            {/if}
+            {#if isHost}
+              <div class="hudDivider"></div>
+              <button class="hudBtn danger" title="Mute all participants" on:click={handleMuteAll}>
+                {@html icons.volumeX} <span>Mute All</span>
+              </button>
+              <button class="hudBtn safe" title="Unmute all participants" on:click={handleUnmuteAll}>
+                {@html icons.volume2} <span>Unmute All</span>
+              </button>
+            {/if}
+          </div>
         </div>
 
       {:else}
         <!-- Voice call participant grid -->
-        <div class="voiceGrid">
-          <div class="voiceTile">
-            <div class="voiceAvatar">Yo</div>
-            <div class="voiceName">You</div>
-          </div>
-          {#each Array.from($remotePeers.values()) as peer (peer.hex)}
-            <div class="voiceTile" class:talking={peer.talking}>
-              <div class="voiceAvatar">{getInitials(peer.hex)}</div>
-              <div class="voiceName">{displayIdentityHex(peer.hex)}</div>
-              {#if peer.talking}<span class="pill ok" style="font-size:11px">speaking</span>{/if}
+        <div class="voiceArea">
+          <div class="voiceGrid">
+            <div class="voiceTile">
+              <div class="voiceAvatar">Yo</div>
+              <div class="voiceName">You</div>
+              {#if $localMuted || $localServerMuted}
+                <span class="voiceStateIcon" title={$localServerMuted ? 'Muted by host' : 'Muted'}>
+                  {@html $localServerMuted ? icons.lock : icons.micOff}
+                </span>
+              {/if}
+              {#if $localDeafened}<span class="voiceStateIcon" title="Deafened">{@html icons.headphonesOff}</span>{/if}
             </div>
-          {/each}
+            {#each Array.from($remotePeers.values()) as peer (peer.hex)}
+              <div class="voiceTile" class:talking={peer.talking}>
+                <div class="voiceAvatar">{getInitials(peer.hex)}</div>
+                <div class="voiceName">{displayIdentityHex(peer.hex)}</div>
+                {#if peer.talking}<span class="pill ok" style="font-size:11px">speaking</span>{/if}
+                {#if peerMuted(peer.hex)}
+                  <span class="voiceStateIcon" title={peerServerMuted(peer.hex) ? 'Muted by host' : 'Muted'}>
+                    {@html peerServerMuted(peer.hex) ? icons.lock : icons.micOff}
+                  </span>
+                {/if}
+                {#if peerDeafened(peer.hex)}<span class="voiceStateIcon" title="Deafened">{@html icons.headphonesOff}</span>{/if}
+              </div>
+            {/each}
+          </div>
+
+          <!-- HUD (cam button hidden in voice) -->
+          <div class="hud">
+            <button
+              class="hudBtn" class:active={$localMuted || $localServerMuted}
+              disabled={$localServerMuted}
+              title={$localServerMuted ? 'Muted by host' : $localMuted ? 'Unmute' : 'Mute mic'}
+              on:click={() => localMuted.update(v => !v)}
+            >{@html $localMuted || $localServerMuted ? icons.micOff : icons.mic}</button>
+            <button
+              class="hudBtn" class:active={$localDeafened}
+              title={$localDeafened ? 'Undeafen' : 'Deafen'}
+              on:click={() => localDeafened.update(v => !v)}
+            >{@html $localDeafened ? icons.headphonesOff : icons.headphones}</button>
+            <button
+              class="hudBtn" class:active={autoSpotlight}
+              title={autoSpotlight ? 'Disable auto-spotlight' : 'Enable auto-spotlight'}
+              on:click={() => autoSpotlight = !autoSpotlight}
+            >{@html autoSpotlight ? icons.pin : icons.pinOff}</button>
+            {#if pinnedSpotlightHex}
+              <button
+                class="hudBtn active"
+                title="Unpin spotlight"
+                on:click={() => pinnedSpotlightHex = null}
+              >{@html icons.eyeOff}</button>
+            {/if}
+            {#if isHost}
+              <div class="hudDivider"></div>
+              <button class="hudBtn danger" title="Mute all participants" on:click={handleMuteAll}>
+                {@html icons.volumeX} <span>Mute All</span>
+              </button>
+              <button class="hudBtn safe" title="Unmute all participants" on:click={handleUnmuteAll}>
+                {@html icons.volume2} <span>Unmute All</span>
+              </button>
+            {/if}
+          </div>
         </div>
       {/if}
 
@@ -324,16 +581,38 @@
         <div class="title">Users ({$usersStore.length})</div>
         <div class="userList">
           {#each $usersStore as u (u.identity?.toHexString?.())}
+            {@const uHex = u.identity?.toHexString?.() ?? ''}
+            {@const uParticipant = participantByHex.get(uHex)}
             <div
               class="userRow"
-              class:me={identityHex($identityStore) === identityHex(u.identity)}
+              class:me={myHex === uHex}
               on:contextmenu={(e) => openMenu(e, u)}
             >
               <div class="nameRow">
                 <div class="name">{displayUser(u)}</div>
                 {#if isInCall(u)}<span class="pill ok callPill">In call</span>{/if}
+                {#if uParticipant && peerServerMuted(uHex)}<span class="pill warn callPill">{@html icons.lock}</span>{/if}
               </div>
               <div class="mono sub">{shortHex(u.identity)}</div>
+              {#if isHost && uHex !== myHex && uParticipant}
+                <div class="hostControls">
+                  <button
+                    class="hostBtn" class:locked={peerServerMuted(uHex)}
+                    title={peerServerMuted(uHex) ? 'Allow to speak' : 'Mute (lock)'}
+                    on:click|stopPropagation={() => handleToggleLock(uParticipant)}
+                  >{@html peerServerMuted(uHex) ? icons.unlock : icons.lock}</button>
+                  <button
+                    class="hostBtn" class:spotlit={pinnedSpotlightHex === uHex}
+                    title={pinnedSpotlightHex === uHex ? 'Remove spotlight' : 'Spotlight'}
+                    on:click|stopPropagation={() => togglePinnedSpotlight(uHex)}
+                  >{@html pinnedSpotlightHex === uHex ? icons.eyeOff : icons.eye}</button>
+                  <button
+                    class="hostBtn kick"
+                    title="Kick from call"
+                    on:click|stopPropagation={() => handleKick(uParticipant)}
+                  >{@html icons.userMinus}</button>
+                </div>
+              {/if}
             </div>
           {/each}
         </div>
@@ -396,6 +675,13 @@
         <button class="menuBtn" on:click={() => void call('Video')}>Video call</button>
       {:else}
         <button class="menuBtn" on:click={() => inviteToCurrentCall()}>Invite to call</button>
+        {#if isHost && menu.target && isInCall(menu.target)}
+          {@const tHex = identityHex(menu.target?.identity)}
+          <button class="menuBtn spotlight" on:click={() => togglePinnedSpotlight(tHex)}>
+            {@html pinnedSpotlightHex === tHex ? icons.eyeOff : icons.eye}
+            {pinnedSpotlightHex === tHex ? 'Remove spotlight' : 'Spotlight'}
+          </button>
+        {/if}
       {/if}
     </div>
   {/if}
@@ -488,4 +774,75 @@
   .voiceTile.talking { border-color: #1f6f3b; box-shadow: 0 0 16px rgba(31,111,59,0.2); }
   .voiceAvatar { width: 64px; height: 64px; border-radius: 50%; background: #192238; border: 2px solid #253150; display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700; }
   .voiceName { font-size: 13px; font-weight: 600; text-align: center; opacity: 0.9; }
+
+  /* Area wrappers */
+  .videoArea { flex: 1; display: flex; flex-direction: column; position: relative; min-height: 0; overflow: hidden; }
+  .voiceArea { flex: 1; display: flex; flex-direction: column; position: relative; min-height: 0; overflow: hidden; }
+
+  /* HUD */
+  .hud { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 6px;
+    background: rgba(11,13,18,0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    border: 1px solid #1b2230; border-radius: 999px; padding: 8px 16px;
+    z-index: 20; box-shadow: 0 4px 24px rgba(0,0,0,0.45); pointer-events: all; }
+  .hudBtn { background: #192238; border: 1px solid #253150; color: #e9eefc;
+    border-radius: 999px; width: 40px; height: 40px; font-size: 18px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: background 0.15s, border-color 0.15s; padding: 0; }
+  .hudBtn:hover:not(:disabled) { filter: brightness(1.2); }
+  .hudBtn.active { background: #2a1420; border-color: #7b2a2a; }
+  .hudBtn.danger { width: auto; padding: 0 14px; font-size: 13px; background: #2a1420; border-color: #4a1e31; color: #ff6b6b; }
+  .hudBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .hudDivider { width: 1px; height: 24px; background: #1b2230; margin: 0 4px; }
+
+  /* Tile overlays */
+  .tileOverlays { position: absolute; bottom: 10px; right: 10px; display: flex; gap: 4px; }
+  .overlayIcon { background: rgba(0,0,0,0.65); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    border-radius: 50%; width: 24px; height: 24px; font-size: 12px;
+    display: flex; align-items: center; justify-content: center; }
+  .overlayIcon.serverMuted { background: rgba(90,30,30,0.85); }
+
+  /* Voice state icons */
+  .voiceStateIcon { font-size: 14px; }
+
+  /* Spotlight layout */
+  .spotlightLayout { flex: 1; display: flex; flex-direction: column; gap: 8px; padding: 8px; min-height: 0; }
+  .spotlightMain { flex: 1; position: relative; border-radius: 14px; overflow: hidden;
+    background: #0d1018; border: 2px solid #1f6f3b;
+    box-shadow: 0 0 0 1px #1f6f3b, 0 0 20px rgba(31,111,59,0.2); min-height: 0; }
+  .thumbnailStrip { height: 110px; flex-shrink: 0; display: flex; gap: 8px; overflow-x: auto; }
+  .thumbTile { position: relative; width: 150px; flex-shrink: 0; border-radius: 10px; overflow: hidden;
+    background: #0d1018; border: 2px solid transparent; cursor: pointer; }
+  .thumbTile.talking { border-color: #1f6f3b; }
+  .thumbTile:hover { border-color: #253150; }
+  .initials.small { width: 36px; height: 36px; font-size: 13px; }
+
+  /* Host controls in users panel */
+  .hostControls { display: flex; gap: 4px; margin-top: 6px; }
+  .hostBtn { background: #141a25; border: 1px solid #1b2230; color: #e9eefc;
+    border-radius: 8px; padding: 3px 8px; font-size: 13px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; }
+  .hostBtn:hover { background: #192238; }
+  .hostBtn.locked { background: #2a1420; border-color: #4a1e31; }
+  .hostBtn.spotlit { background: #0f2a18; border-color: #1f6f3b; }
+  .hostBtn.kick { color: #ff6b6b; }
+  .hostBtn.kick:hover { background: #2a1420; border-color: #4a1e31; }
+
+  /* Unmute All button (green variant) */
+  .hudBtn.safe { width: auto; padding: 0 14px; font-size: 13px; background: #0f2a18; border-color: #1f6f3b; color: #4ade80; }
+
+  /* SVG inside hudBtn inherit color */
+  .hudBtn svg { display: block; }
+  .hudBtn.danger span, .hudBtn.safe span { margin-left: 4px; }
+
+  /* Context menu spotlight item */
+  .menuBtn.spotlight { display: flex; align-items: center; gap: 6px; }
+
+  /* Overflow chip in thumbnail strip */
+  .overflowChip { background: #111827; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border: 1px dashed #253150; cursor: default; }
+  .overflowCount { font-size: 18px; font-weight: 700; color: #6b7280; }
+
+  /* Overlay icons — SVG sizing */
+  .overlayIcon svg { display: block; }
+  .voiceStateIcon svg { display: block; }
 </style>
