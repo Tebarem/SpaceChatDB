@@ -183,6 +183,21 @@
     return displayIdentity(invitedBy);
   }
 
+  function getInitials(hex: string): string {
+    const name = displayIdentityHex(hex);
+    return name.slice(0, 2).toUpperCase();
+  }
+
+  function isInCall(u: any): boolean {
+    const active = $activeCallStore;
+    if (!active) return false;
+    const rid = roomIdOfAny(active);
+    const hex = u.identity?.toHexString?.() ?? '';
+    return ($callParticipantsStore ?? []).some(
+      (p) => tagLower(p.state) === 'joined' && roomIdOfAny(p) === rid && (p.identity?.toHexString?.() ?? '') === hex
+    );
+  }
+
   onMount(() => {
     connectStdb();
     const onWindowClick = () => closeMenu();
@@ -208,6 +223,12 @@
       });
     }
   }
+
+  $: totalVideoTiles = 1 + $remotePeers.size;
+  $: gridCols = totalVideoTiles <= 1 ? 1
+              : totalVideoTiles <= 4 ? 2
+              : totalVideoTiles <= 9 ? 3
+              : 4;
 </script>
 
 <div class="app" on:keydown={onKeyDown}>
@@ -229,50 +250,144 @@
     </div>
   </header>
 
-  <div class="content">
-    <section class="chat">
-      <div class="chatHeader">
-        <div class="title">Chat</div>
-        <div class="nick">
-          <input class="input" placeholder="set nickname" bind:value={nicknameText} />
-          <button class="btn" on:click={setNick}>Set</button>
+  {#if $activeCallStore}
+    <!-- CALL VIEW -->
+    <div class="callLayout">
+
+      <!-- Left: compact chat sidebar -->
+      <div class="chatSidebar">
+        <div class="sidebarHeader">
+          <div>
+            <div class="callTitle">{callTypeLabel($activeCallStore)} Call</div>
+            <div class="callCount">{joinedCount($activeCallStore)} joined</div>
+          </div>
+          <button class="btn danger" on:click={() => hangup($activeCallStore)}>Leave</button>
+        </div>
+        <div class="messages" bind:this={messagesEl}>
+          {#each $messagesStore as m (msgKey(m))}
+            <div class="msg">
+              <div class="meta">
+                <span class="who">{displayIdentity(m.sender)}</span>
+              </div>
+              <div class="text">{m.text}</div>
+            </div>
+          {/each}
+        </div>
+        <div class="composer">
+          <input class="input grow" placeholder="message…" bind:value={messageText} />
+          <button class="btn" on:click={onSend}>↑</button>
         </div>
       </div>
 
-      <div class="messages" bind:this={messagesEl}>
-        {#each $messagesStore as m (msgKey(m))}
-          <div class="msg">
-            <div class="meta">
-              <span class="who">{displayIdentity(m.sender)}</span>
-              <span class="mono id">{m.sender?.toHexString?.()?.slice(0, 10)}…</span>
+      <!-- Right: video or voice grid -->
+      {#if callTypeTag($activeCallStore) === 'video'}
+        <div class="videoGrid" style="grid-template-columns: repeat({gridCols}, 1fr)">
+          <!-- Local tile -->
+          <div class="videoTile">
+            <video class="videoFeed" autoplay playsinline muted bind:this={localEl}></video>
+            <div class="tileLabel">You</div>
+          </div>
+          <!-- Remote tiles -->
+          {#each Array.from($remotePeers.values()) as peer (peer.hex)}
+            <div class="videoTile" class:talking={peer.talking}>
+              {#if peer.videoUrl}
+                <img class="videoFeed" src={peer.videoUrl} alt="video" />
+              {:else}
+                <div class="tilePlaceholder">
+                  <div class="initials">{getInitials(peer.hex)}</div>
+                </div>
+              {/if}
+              <div class="tileLabel">{displayIdentityHex(peer.hex)}</div>
             </div>
-            <div class="text">{m.text}</div>
-          </div>
-        {/each}
-      </div>
+          {/each}
+        </div>
 
-      <div class="composer">
-        <input class="input grow" placeholder="type a message…" bind:value={messageText} />
-        <button class="btn" on:click={onSend}>Send</button>
-      </div>
-    </section>
-
-    <aside class="users">
-      <div class="title">Users ({$usersStore.length})</div>
-      <div class="userList">
-        {#each $usersStore as u (u.identity?.toHexString?.())}
-          <div
-            class="userRow"
-            class:me={identityHex($identityStore) === identityHex(u.identity)}
-            on:contextmenu={(e) => openMenu(e, u)}
-          >
-            <div class="name">{displayUser(u)}</div>
-            <div class="mono sub">{shortHex(u.identity)}</div>
+      {:else}
+        <!-- Voice call participant grid -->
+        <div class="voiceGrid">
+          <div class="voiceTile">
+            <div class="voiceAvatar">Yo</div>
+            <div class="voiceName">You</div>
           </div>
-        {/each}
-      </div>
-    </aside>
-  </div>
+          {#each Array.from($remotePeers.values()) as peer (peer.hex)}
+            <div class="voiceTile" class:talking={peer.talking}>
+              <div class="voiceAvatar">{getInitials(peer.hex)}</div>
+              <div class="voiceName">{displayIdentityHex(peer.hex)}</div>
+              {#if peer.talking}<span class="pill ok" style="font-size:11px">speaking</span>{/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- Right: users panel -->
+      <aside class="users callUsers">
+        <div class="title">Users ({$usersStore.length})</div>
+        <div class="userList">
+          {#each $usersStore as u (u.identity?.toHexString?.())}
+            <div
+              class="userRow"
+              class:me={identityHex($identityStore) === identityHex(u.identity)}
+              on:contextmenu={(e) => openMenu(e, u)}
+            >
+              <div class="nameRow">
+                <div class="name">{displayUser(u)}</div>
+                {#if isInCall(u)}<span class="pill ok callPill">In call</span>{/if}
+              </div>
+              <div class="mono sub">{shortHex(u.identity)}</div>
+            </div>
+          {/each}
+        </div>
+      </aside>
+
+    </div>
+
+  {:else}
+    <!-- NORMAL VIEW -->
+    <div class="content">
+      <section class="chat">
+        <div class="chatHeader">
+          <div class="title">Chat</div>
+          <div class="nick">
+            <input class="input" placeholder="set nickname" bind:value={nicknameText} />
+            <button class="btn" on:click={setNick}>Set</button>
+          </div>
+        </div>
+
+        <div class="messages" bind:this={messagesEl}>
+          {#each $messagesStore as m (msgKey(m))}
+            <div class="msg">
+              <div class="meta">
+                <span class="who">{displayIdentity(m.sender)}</span>
+                <span class="mono id">{m.sender?.toHexString?.()?.slice(0, 10)}…</span>
+              </div>
+              <div class="text">{m.text}</div>
+            </div>
+          {/each}
+        </div>
+
+        <div class="composer">
+          <input class="input grow" placeholder="type a message…" bind:value={messageText} />
+          <button class="btn" on:click={onSend}>Send</button>
+        </div>
+      </section>
+
+      <aside class="users">
+        <div class="title">Users ({$usersStore.length})</div>
+        <div class="userList">
+          {#each $usersStore as u (u.identity?.toHexString?.())}
+            <div
+              class="userRow"
+              class:me={identityHex($identityStore) === identityHex(u.identity)}
+              on:contextmenu={(e) => openMenu(e, u)}
+            >
+              <div class="name">{displayUser(u)}</div>
+              <div class="mono sub">{shortHex(u.identity)}</div>
+            </div>
+          {/each}
+        </div>
+      </aside>
+    </div>
+  {/if}
 
   {#if menu.open}
     <div class="contextMenu" style="left:{menu.x}px; top:{menu.y}px;">
@@ -298,56 +413,6 @@
         </div>
       </div>
     </div>
-  {/if}
-
-  {#if $activeCallStore}
-    <div class="callBar">
-      <div class="callInfo">
-        <div class="callTitle">
-          {callTypeLabel($activeCallStore)} call
-          <span class="mono">({joinedCount($activeCallStore)} joined)</span>
-        </div>
-
-        {#if callTypeTag($activeCallStore) === 'voice'}
-          <div class="talkGroup">
-            {#each Array.from($remotePeers.values()) as peer (peer.hex)}
-              <div class="talk">
-                {displayIdentityHex(peer.hex)}:
-                {#if peer.talking}
-                  <span class="pill ok">talking</span>
-                {:else}
-                  <span class="pill">silent</span>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </div>
-
-      <div class="callActions">
-        <button class="btn danger" on:click={() => hangup($activeCallStore)}>Leave</button>
-      </div>
-    </div>
-
-    {#if callTypeTag($activeCallStore) === 'video'}
-      <div class="videoStage">
-        <div class="videoPane">
-          <div class="videoLabel">You</div>
-          <video class="video" autoplay playsinline muted bind:this={localEl}></video>
-        </div>
-
-        {#each Array.from($remotePeers.values()) as peer (peer.hex)}
-          <div class="videoPane">
-            <div class="videoLabel">{displayIdentityHex(peer.hex)}</div>
-            {#if peer.videoUrl}
-              <img class="video" src={peer.videoUrl} alt="remote video" />
-            {:else}
-              <div class="videoPlaceholder">Waiting…</div>
-            {/if}
-          </div>
-        {/each}
-      </div>
-    {/if}
   {/if}
 </div>
 
@@ -393,14 +458,34 @@
   .modalTitle { font-weight: 700; margin-bottom: 8px; }
   .modalBody { opacity: 0.9; margin-bottom: 12px; }
   .modalActions { display: flex; gap: 8px; justify-content: flex-end; }
-  .callBar { position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 55; display: flex; justify-content: space-between; align-items: center; border: 1px solid #1b2230; background: #0b0d12; border-radius: 14px; padding: 12px 12px; gap: 12px; }
-  .callInfo { display: flex; flex-direction: column; gap: 6px; }
-  .callTitle { font-weight: 600; }
-  .talkGroup { display: flex; flex-wrap: wrap; gap: 8px; }
-  .talk { display: flex; align-items: center; gap: 6px; font-size: 13px; }
-  .videoStage { position: fixed; left: 12px; right: 316px; bottom: 86px; top: 70px; z-index: 54; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; overflow: auto; }
-  .videoPane { border: 1px solid #1b2230; background: #0b0d12; border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; min-height: 200px; }
-  .videoLabel { padding: 10px 12px; border-bottom: 1px solid #1b2230; font-weight: 600; }
-  .video { width: 100%; height: 100%; object-fit: contain; background: #000; flex: 1; }
-  .videoPlaceholder { flex: 1; display: grid; place-items: center; opacity: 0.7; }
+
+  /* Call layout shell */
+  .callLayout { flex: 1; display: flex; min-height: 0; background: #080a0f; }
+
+  /* Left chat sidebar */
+  .chatSidebar { width: 260px; flex-shrink: 0; display: flex; flex-direction: column; border-right: 1px solid #1b2230; background: #0b0d12; min-height: 0; }
+  .sidebarHeader { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-bottom: 1px solid #1b2230; flex-shrink: 0; }
+  .callTitle { font-weight: 700; font-size: 14px; }
+  .callCount { font-size: 12px; opacity: 0.55; margin-top: 2px; }
+
+  /* Video grid */
+  .videoGrid { flex: 1; display: grid; grid-auto-rows: 1fr; gap: 8px; padding: 8px; overflow: auto; min-height: 0; }
+  .videoTile { position: relative; border-radius: 14px; overflow: hidden; background: #0d1018; border: 2px solid transparent; transition: border-color 0.25s, box-shadow 0.25s; }
+  .videoTile.talking { border-color: #1f6f3b; box-shadow: 0 0 0 1px #1f6f3b, 0 0 16px rgba(31,111,59,0.25); }
+  .videoFeed { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .tileLabel { position: absolute; bottom: 10px; left: 10px; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; letter-spacing: 0.2px; }
+  .tilePlaceholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  .initials { width: 72px; height: 72px; border-radius: 50%; background: #192238; border: 2px solid #253150; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 700; letter-spacing: 1px; }
+
+  /* Call-mode users panel */
+  .callUsers { width: 280px; flex-shrink: 0; border-radius: 0; border-top: none; border-bottom: none; border-right: none; border-left: 1px solid #1b2230; }
+  .nameRow { display: flex; align-items: center; gap: 6px; }
+  .callPill { padding: 2px 6px; font-size: 10px; }
+
+  /* Voice grid */
+  .voiceGrid { flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); align-content: start; gap: 12px; padding: 16px; overflow: auto; }
+  .voiceTile { border: 2px solid transparent; border-radius: 16px; background: #0d1018; padding: 24px 16px; display: flex; flex-direction: column; align-items: center; gap: 10px; transition: border-color 0.25s, box-shadow 0.25s; }
+  .voiceTile.talking { border-color: #1f6f3b; box-shadow: 0 0 16px rgba(31,111,59,0.2); }
+  .voiceAvatar { width: 64px; height: 64px; border-radius: 50%; background: #192238; border: 2px solid #253150; display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700; }
+  .voiceName { font-size: 13px; font-weight: 600; text-align: center; opacity: 0.9; }
 </style>
