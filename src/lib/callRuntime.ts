@@ -550,8 +550,7 @@ export async function startCallRuntime(
   });
   rt.micStream = mic;
 
-  const workletUrl = new URL('./pcm-capture-worklet.ts', import.meta.url);
-  await micAudioCtx.audioWorklet.addModule(workletUrl);
+  await micAudioCtx.audioWorklet.addModule('/pcm-capture-worklet.js');
 
   const source = micAudioCtx.createMediaStreamSource(mic);
   const node = new AudioWorkletNode(micAudioCtx, 'pcm-capture');
