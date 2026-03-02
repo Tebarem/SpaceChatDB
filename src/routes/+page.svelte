@@ -28,7 +28,7 @@
     setParticipantServerMuted,
     kickParticipant
   } from '$lib/stdb';
-  import { startCallRuntime, stopCallRuntime, localVideoStream, remotePeers, type PeerState, localMuted, localDeafened, localCamOff, localServerMuted, activeSpeakerHex, setVisibleVideoHexes, networkInMbps, networkOutMbps, networkLatencyMs } from '$lib/callRuntime';
+  import { startCallRuntime, stopCallRuntime, localVideoStream, remotePeers, type PeerState, localMuted, localDeafened, localCamOff, localServerMuted, localTalking, activeSpeakerHex, setVisibleVideoHexes, networkInMbps, networkOutMbps, networkLatencyMs } from '$lib/callRuntime';
 
   let messageText = '';
   let nicknameText = '';
@@ -422,7 +422,7 @@
                 </div>
               </div>
               <div class="thumbnailStrip">
-                <div class="thumbTile">
+                <div class="thumbTile" class:talking={$localTalking}>
                   <video class="videoFeed" autoplay playsinline muted bind:this={localEl}></video>
                   <div class="tileLabel">You</div>
                   {#if $localMuted || $localServerMuted}
@@ -454,7 +454,7 @@
           {:else}
             <!-- Normal grid layout -->
             <div class="videoGrid" style="grid-template-columns: repeat({gridCols}, 1fr)">
-              <div class="videoTile">
+              <div class="videoTile" class:talking={$localTalking}>
                 <video class="videoFeed" autoplay playsinline muted bind:this={localEl}></video>
                 <div class="tileLabel">You</div>
                 <div class="tileOverlays">
@@ -525,9 +525,10 @@
         <!-- Voice call participant grid -->
         <div class="voiceArea">
           <div class="voiceGrid">
-            <div class="voiceTile">
+            <div class="voiceTile" class:talking={$localTalking}>
               <div class="voiceAvatar">Yo</div>
               <div class="voiceName">You</div>
+              {#if $localTalking}<span class="pill ok" style="font-size:11px">speaking</span>{/if}
               {#if $localMuted || $localServerMuted}
                 <span class="voiceStateIcon" title={$localServerMuted ? 'Muted by host' : 'Muted'}>
                   {@html $localServerMuted ? icons.lock : icons.micOff}

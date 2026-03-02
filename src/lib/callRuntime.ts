@@ -20,6 +20,7 @@ export const localMuted       = writable<boolean>(false);
 export const localDeafened    = writable<boolean>(false);
 export const localCamOff      = writable<boolean>(false);
 export const localServerMuted = writable<boolean>(false);
+export const localTalking     = writable<boolean>(false);
 export const activeSpeakerHex = writable<string | null>(null);
 
 export const networkInMbps    = writable<number>(0);
@@ -625,9 +626,11 @@ export async function startCallRuntime(
       const isTalking = rms >= runtime.cfg.audio_talking_rms_threshold;
       if (isTalking) {
         silenceFrameCount = 0;
+        localTalking.set(true);
       } else {
         silenceFrameCount++;
         if (silenceFrameCount > SILENCE_HOLDOFF_FRAMES) {
+          localTalking.set(false);
           continue; // suppress — do NOT increment sendSeqAudio
         }
       }
@@ -686,6 +689,7 @@ export function stopCallRuntime() {
   localDeafened.set(false);
   localCamOff.set(false);
   localServerMuted.set(false);
+  localTalking.set(false);
   activeSpeakerHex.set(null);
   visibleVideoHexes.set(null);
   networkInMbps.set(0);
