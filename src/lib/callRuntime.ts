@@ -271,6 +271,15 @@ export function updatePeerMediaState(hex: string, muted: boolean, deafened: bool
   });
 }
 
+export function resetPeerVideoState(hex: string): void {
+  if (!runtime) return;
+  const peer = runtime.peers.get(hex);
+  if (!peer) return;
+  peer.videoJitterBuffer.clear();
+  peer.recvSeqVideo = -1;
+  peer.lastVideoIframeSeq = -1;
+}
+
 function displayVideoFrame(peer: PerPeerRuntime, jpeg: Uint8Array) {
   const blob = new Blob([jpeg], { type: 'image/webp' });
   const url = URL.createObjectURL(blob);
@@ -447,11 +456,15 @@ async function startOrRestartVideo(rt: ActiveRuntime, room: any) {
   const roomIdStr = rt.roomIdStr;
 
   let capturing = false;
+  let wasOff = get(localCamOff);
 
   rt.videoTimer = window.setInterval(async () => {
     if (!runtime || runtime.roomIdStr !== roomIdStr) return;
     if (!g || capturing) return; // guard: skip if previous capture in progress
-    if (get(localCamOff)) return;
+    const isOff = get(localCamOff);
+    const justReenabled = wasOff && !isOff;
+    wasOff = isOff;
+    if (isOff) return;
     capturing = true;
     try {
       g.drawImage(videoEl, 0, 0, w, h);
@@ -462,7 +475,7 @@ async function startOrRestartVideo(rt: ActiveRuntime, room: any) {
 
       const bytes = new Uint8Array(await blob.arrayBuffer());
       const seq = rt.sendSeqVideo++;
-      const isIframe = (seq % rt.cfg.video_iframe_interval) === 0;
+      const isIframe = justReenabled || (seq % rt.cfg.video_iframe_interval) === 0;
 
       safeSendReducer(rt.conn, 'send_video_frame', 'sendVideoFrame', {
         room_id: roomId, roomId, seq, width: w, height: h, is_iframe: isIframe, isIframe, jpeg: bytes

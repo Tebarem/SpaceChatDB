@@ -13,6 +13,7 @@ import {
   localServerMuted,
   localMuted,
   updatePeerMediaState,
+  resetPeerVideoState,
 } from './callRuntime';
 import { mediaSettingsStore, type MediaSettings } from './mediaSettings';
 
@@ -479,11 +480,16 @@ function attachRowCallbacks(conn: DbConnection) {
         }
       } else {
         // Remote peer's row: update their PeerState media fields
+        const newCamOff = !!(row.cam_off ?? row.camOff);
+        const oldCamOff = !!(_old?.cam_off ?? _old?.camOff);
+        if (oldCamOff && !newCamOff) {
+          resetPeerVideoState(rowHex);
+        }
         updatePeerMediaState(
           rowHex,
           !!(row.muted),
           !!(row.deafened),
-          !!(row.cam_off ?? row.camOff),
+          newCamOff,
           !!(row.server_muted ?? row.serverMuted)
         );
       }
