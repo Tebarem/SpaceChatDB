@@ -22,6 +22,10 @@ export const localCamOff      = writable<boolean>(false);
 export const localServerMuted = writable<boolean>(false);
 export const activeSpeakerHex = writable<string | null>(null);
 
+export const networkInMbps    = writable<number>(0);
+export const networkOutMbps   = writable<number>(0);
+export const networkLatencyMs = writable<number | null>(null);
+
 // null = show all (no spotlight mode); Set = only decode video for these hexes
 export const visibleVideoHexes = writable<Set<string> | null>(null);
 
@@ -69,6 +73,10 @@ type ActiveRuntime = {
 };
 
 let runtime: ActiveRuntime | null = null;
+
+let bytesInCount  = 0;
+let bytesOutCount = 0;
+const pingTimestamps = new Map<number, number>(); // audioSeq → performance.now()
 
 function mustFinite(n: number, name: string) {
   if (!Number.isFinite(n)) throw new Error(`Invalid ${name}`);
@@ -474,6 +482,7 @@ async function startOrRestartVideo(rt: ActiveRuntime, room: any) {
       if (blob.size > rt.cfg.video_max_frame_bytes) return;
 
       const bytes = new Uint8Array(await blob.arrayBuffer());
+      bytesOutCount += bytes.length;
       const seq = rt.sendSeqVideo++;
       const isIframe = justReenabled || (seq % rt.cfg.video_iframe_interval) === 0;
 
@@ -524,6 +533,14 @@ export async function startCallRuntime(
     micAudioCtx,
   };
   runtime = rt;
+
+  bytesInCount = 0; bytesOutCount = 0; pingTimestamps.clear();
+  const statsInterval = window.setInterval(() => {
+    networkInMbps.set(Math.round(bytesInCount  * 8 / 1_000_000 * 100) / 100);
+    networkOutMbps.set(Math.round(bytesOutCount * 8 / 1_000_000 * 100) / 100);
+    bytesInCount = 0; bytesOutCount = 0;
+  }, 1000);
+  rt.stopFns.push(() => window.clearInterval(statsInterval));
 
   // Initialize peers from initialPeers
   for (const p of initialPeers) {
@@ -616,6 +633,8 @@ export async function startCallRuntime(
       }
 
       const seq = runtime.sendSeqAudio++;
+      bytesOutCount += bytes.length;
+      pingTimestamps.set(seq, performance.now());
 
       safeSendReducer(runtime.conn, 'send_audio_frame', 'sendAudioFrame', {
         room_id: roomId,
@@ -669,6 +688,11 @@ export function stopCallRuntime() {
   localServerMuted.set(false);
   activeSpeakerHex.set(null);
   visibleVideoHexes.set(null);
+  networkInMbps.set(0);
+  networkOutMbps.set(0);
+  networkLatencyMs.set(null);
+  bytesInCount = 0; bytesOutCount = 0;
+  pingTimestamps.clear();
 }
 
 export function handleAudioEvent(row: any) {
@@ -679,7 +703,18 @@ export function handleAudioEvent(row: any) {
   const fromHex = row?.from?.toHexString?.() ?? '';
 
   if (ridStr !== runtime.roomIdStr) return;
-  if (fromHex === runtime.myHex) return;
+  if (fromHex === runtime.myHex) {
+    const seq = Number(row.seq ?? 0);
+    const sent = pingTimestamps.get(seq);
+    if (sent !== undefined) {
+      networkLatencyMs.set(Math.round(performance.now() - sent));
+      pingTimestamps.delete(seq);
+    }
+    for (const s of pingTimestamps.keys()) {
+      if (s < seq - 30) pingTimestamps.delete(s);
+    }
+    return;
+  }
 
   const peer = runtime.peers.get(fromHex);
   if (!peer) return;
@@ -687,6 +722,7 @@ export function handleAudioEvent(row: any) {
 
   const bytes = getBytes(row, ['pcm16le', 'pcm16Le', 'pcm16_le', 'pcm_16le']);
   if (!bytes) return;
+  bytesInCount += bytes.length;
 
   const pcm = mulawBytesToFloat(bytes);
   const sr = Number(row.sample_rate ?? row.sampleRate ?? runtime.cfg.audio_target_sample_rate);
@@ -726,6 +762,7 @@ export function handleVideoEvent(row: any) {
 
   const jpeg = getBytes(row, ['jpeg']);
   if (!jpeg) return;
+  bytesInCount += jpeg.length;
 
   const seq = Number(row.seq ?? 0);
   const isIframe: boolean = row.is_iframe ?? row.isIframe ?? false;

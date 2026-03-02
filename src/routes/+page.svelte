@@ -28,11 +28,12 @@
     setParticipantServerMuted,
     kickParticipant
   } from '$lib/stdb';
-  import { startCallRuntime, stopCallRuntime, localVideoStream, remotePeers, type PeerState, localMuted, localDeafened, localCamOff, localServerMuted, activeSpeakerHex, setVisibleVideoHexes } from '$lib/callRuntime';
+  import { startCallRuntime, stopCallRuntime, localVideoStream, remotePeers, type PeerState, localMuted, localDeafened, localCamOff, localServerMuted, activeSpeakerHex, setVisibleVideoHexes, networkInMbps, networkOutMbps, networkLatencyMs } from '$lib/callRuntime';
 
   let messageText = '';
   let nicknameText = '';
   let localEl: HTMLVideoElement | null = null;
+  let showStats = false;
 
   let messagesEl: HTMLDivElement | null = null;
   let lastScrollKey = '';
@@ -55,6 +56,7 @@
     eye: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`,
     eyeOff: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="2" y1="2" x2="22" y2="22"/></svg>`,
     userMinus: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="22" y1="11" x2="16" y2="11"/></svg>`,
+    stats: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`,
   };
 
   type MenuState = { open: boolean; x: number; y: number; target: any | null };
@@ -348,17 +350,27 @@
     <div class="brand">Voice/Video Demo</div>
     <div class="status">
       {#if $isConnected}
+        <div class="statsWrapper">
+          <button class="statsBtn" class:active={showStats} on:click={() => showStats = !showStats} title="Network stats">{@html icons.stats}</button>
+          {#if showStats}
+            <div class="statsPanel">
+              <div class="statRow"><span class="statLabel">↓ In</span><span class="statValue">{$networkInMbps.toFixed(2)} Mbps</span></div>
+              <div class="statRow"><span class="statLabel">↑ Out</span><span class="statValue">{$networkOutMbps.toFixed(2)} Mbps</span></div>
+              {#if $networkLatencyMs !== null}
+                <div class="statRow"><span class="statLabel">Latency</span><span class="statValue">{$networkLatencyMs} ms</span></div>
+              {:else}
+                <div class="statRow"><span class="statLabel">Latency</span><span class="statValue muted">—</span></div>
+              {/if}
+            </div>
+          {/if}
+        </div>
         <span class="pill ok">Connected</span>
         <span class="mono">{shortHex($identityStore)}</span>
       {:else}
         <span class="pill warn">Connecting…</span>
       {/if}
-      {#if $connectionError}
-        <span class="pill err">{$connectionError}</span>
-      {/if}
-      {#if $actionError}
-        <span class="pill err">{$actionError}</span>
-      {/if}
+      {#if $connectionError}<span class="pill err">{$connectionError}</span>{/if}
+      {#if $actionError}<span class="pill err">{$actionError}</span>{/if}
     </div>
   </header>
 
@@ -712,6 +724,15 @@
   .pill.ok { border-color: #1f6f3b; background: #0f1d15; }
   .pill.warn { border-color: #6a5a1c; background: #16140c; }
   .pill.err { border-color: #7b2a2a; background: #1d0f0f; }
+  .statsWrapper { position: relative; }
+  .statsBtn { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; border: 1px solid #1b2230; background: #141a25; color: #8899bb; cursor: pointer; transition: background 0.15s, color 0.15s; }
+  .statsBtn:hover { background: #1b2540; color: #c0d0f0; }
+  .statsBtn.active { background: #1b2540; border-color: #2a4070; color: #7eb8ff; }
+  .statsPanel { position: absolute; top: calc(100% + 8px); right: 0; min-width: 160px; background: #0f121a; border: 1px solid #1b2230; border-radius: 8px; padding: 8px 12px; z-index: 100; display: flex; flex-direction: column; gap: 4px; }
+  .statRow { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+  .statLabel { font-size: 11px; color: #6070a0; }
+  .statValue { font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: #c0d0f0; }
+  .statValue.muted { color: #404060; }
   .content { flex: 1; display: grid; grid-template-columns: 1fr 280px; gap: 12px; padding: 12px; min-height: 0; }
   .chat, .users { border: 1px solid #1b2230; background: #0f121a; border-radius: 12px; min-height: 0; display: flex; flex-direction: column; }
   .chatHeader { display: flex; justify-content: space-between; align-items: center; padding: 10px 10px; border-bottom: 1px solid #1b2230; }
